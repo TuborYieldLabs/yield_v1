@@ -13,6 +13,43 @@ pub enum ErrorCode {
     MathError,
     #[msg("Failed Unwrap")]
     FailedUnwrap,
+    #[msg("Required Signature Is Missing")]
+    MissingRequiredSignature,
+    #[msg("Multisig account is not authorized")]
+    MultisigAccountNotAuthorized,
+    #[msg("Invalid instruction hash")]
+    InvalidInstructionHash,
+    #[msg("Multisig transaction already signed")]
+    MultisigAlreadySigned,
+    #[msg("Multisig transaction already executed")]
+    MultisigAlreadyExecuted,
+    #[msg("Invalid referrer provided")]
+    InvalidReferrer,
+    #[msg("Invalid bump provided")]
+    InvalidBump,
+    #[msg("Constraint owner check failed")]
+    ConstraintOwner,
+    #[msg("Invalid program executable")]
+    InvalidProgramExecutable,
+    #[msg("Invalid authority")]
+    InvalidAuthority,
+    #[msg("Invalid account provided")]
+    InvalidAccount,
+    #[msg("Insufficient funds for operation")]
+    InsufficientFunds,
+    // Trade-specific errors
+    #[msg("Trade size cannot be zero")]
+    InvalidTradeSize,
+    #[msg("Entry price cannot be zero")]
+    InvalidEntryPrice,
+    #[msg("Take profit must be higher than entry price for buy orders")]
+    InvalidTakeProfitBuy,
+    #[msg("Take profit must be lower than entry price for sell orders")]
+    InvalidTakeProfitSell,
+    #[msg("Stop loss must be lower than entry price for buy orders")]
+    InvalidStopLossBuy,
+    #[msg("Stop loss must be higher than entry price for sell orders")]
+    InvalidStopLossSell,
 }
 
 #[macro_export]

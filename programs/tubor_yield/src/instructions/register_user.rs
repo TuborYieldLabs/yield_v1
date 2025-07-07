@@ -3,7 +3,7 @@ use anchor_lang::prelude::*;
 use crate::{
     error::ErrorCode,
     math::SafeMath,
-    state::{ReferralRegistry, RegisterUserEvent, Size, TYield, User, UserStatus},
+    state::{ReferralLink, ReferralRegistry, RegisterUserEvent, Size, TYield, User, UserStatus},
 };
 
 #[derive(AnchorSerialize, AnchorDeserialize)]
@@ -27,6 +27,12 @@ pub struct RegisterUser<'info> {
     )]
     pub user: Box<Account<'info, User>>,
 
+    #[account(
+        seeds = [b"user", referrer_user_seeds(params.referrer).as_ref()],
+        bump,
+    )]
+    pub referrer_user: Option<Box<Account<'info, User>>>,
+
     /// Referral registry PDA.
     ///
     /// Only initialized if a referrer is provided.  
@@ -39,6 +45,15 @@ pub struct RegisterUser<'info> {
         bump
     )]
     pub referral_registry: Option<Box<Account<'info, ReferralRegistry>>>,
+
+    #[account(
+        init_if_needed,
+        payer = payer,
+        space = ReferralLink::SIZE,
+        seeds = [b"referral_link", params.referrer.unwrap_or(Pubkey::default()).as_ref(), authority.key().as_ref()],
+        bump,
+    )]
+    pub referral_link: Option<Box<Account<'info, ReferralLink>>>,
 
     /// The authority (owner) of the user account.
     ///
@@ -73,6 +88,25 @@ pub struct RegisterUser<'info> {
 }
 
 pub fn register_user(ctx: Context<RegisterUser>, params: RegisterUserParams) -> Result<()> {
+    if params.referrer.is_none()
+        && (ctx.accounts.referral_registry.is_some() || ctx.accounts.referral_link.is_some())
+    {
+        return Err(ErrorCode::InvalidReferrer.into());
+    }
+
+    if let Some(referrer_pubkey) = params.referrer {
+        if referrer_pubkey != Pubkey::default() {
+            let referrer_user = ctx
+                .accounts
+                .referrer_user
+                .as_ref()
+                .ok_or(ErrorCode::ReferrerNotAUser)?;
+            if referrer_user.authority != referrer_pubkey {
+                return Err(ErrorCode::ReferrerNotAUser.into());
+            }
+        }
+    }
+
     let user = &mut ctx.accounts.user;
     let current_time = ctx.accounts.t_yield.get_time()?;
 
@@ -95,17 +129,21 @@ pub fn register_user(ctx: Context<RegisterUser>, params: RegisterUserParams) -> 
                     referral_registry.bump =
                         ctx.bumps.referral_registry.ok_or(ErrorCode::InvalidBump)?;
                 }
+                // Increment total referred users and update timestamp (actual referral links are tracked via ReferralLink accounts)
+                referral_registry.total_referred_users =
+                    referral_registry.total_referred_users.safe_add(1)?;
+                referral_registry.updated_at = current_time;
+            }
 
-                // Check if this user is already in the referrer's list
-                let user_already_referred =
-                    referral_registry.is_user_referred(ctx.accounts.authority.key());
-
-                if !user_already_referred && referral_registry.total_referred_users < 100 {
-                    let index = referral_registry.total_referred_users as usize;
-                    referral_registry.referred_users[index] = ctx.accounts.authority.key();
-                    referral_registry.total_referred_users =
-                        referral_registry.total_referred_users.safe_add(1)?;
-                    referral_registry.updated_at = current_time;
+            if let Some(ref mut referral_link) = ctx.accounts.referral_link {
+                // Only initialize if new
+                if referral_link.referrer == Pubkey::default()
+                    && referral_link.referred_user == Pubkey::default()
+                {
+                    referral_link.referrer = referrer_pubkey;
+                    referral_link.referred_user = ctx.accounts.authority.key();
+                    referral_link.created_at = current_time;
+                    referral_link.bump = ctx.bumps.referral_link.ok_or(ErrorCode::InvalidBump)?;
                 }
             }
         }
@@ -130,4 +168,9 @@ pub fn register_user(ctx: Context<RegisterUser>, params: RegisterUserParams) -> 
     });
 
     Ok(())
+}
+
+// Helper function for referrer_user seeds
+fn referrer_user_seeds(referrer: Option<Pubkey>) -> Pubkey {
+    referrer.unwrap_or_default()
 }

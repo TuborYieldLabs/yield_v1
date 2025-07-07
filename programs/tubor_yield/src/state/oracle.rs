@@ -5,7 +5,7 @@ use anchor_lang::prelude::*;
 use crate::error::TYieldResult;
 use crate::math::constants::{ORACLE_EXPONENT_SCALE, ORACLE_MAX_PRICE, ORACLE_PRICE_SCALE};
 use crate::math::safe_math::SafeMath;
-use crate::math::USD_DECIMALS;
+use crate::math::{PERCENTAGE_PRECISION_U128, USD_DECIMALS};
 use crate::state::Size;
 
 #[derive(Copy, Clone, PartialEq, AnchorSerialize, AnchorDeserialize, Debug, Default)]
@@ -257,35 +257,35 @@ impl OraclePrice {
     }
 
     // Helper function for custom oracle price validation
-    // fn validate_custom_price(price: u64, conf: u64, max_price_error: u64) -> TYieldResult<()> {
-    //     if price == 0 {
-    //         return Err(crate::error::ErrorCode::MathError);
-    //     }
+    pub fn validate_custom_price(price: u64, conf: u64, max_price_error: u64) -> TYieldResult<()> {
+        if price == 0 {
+            return Err(crate::error::ErrorCode::MathError);
+        }
 
-    //     // Check if confidence interval is within acceptable bounds
-    //     let conf_ratio = (conf as u128)
-    //         .safe_mul(BPS_POWER)?
-    //         .safe_div(price as u128)?;
+        // Check if confidence interval is within acceptable bounds
+        let conf_ratio = (conf as u128)
+            .safe_mul(PERCENTAGE_PRECISION_U128)?
+            .safe_div(price as u128)?;
 
-    //     if conf_ratio > max_price_error as u128 {
-    //         return Err(crate::error::ErrorCode::MathError);
-    //     }
+        if conf_ratio > max_price_error as u128 {
+            return Err(crate::error::ErrorCode::MathError);
+        }
 
-    //     Ok(())
-    // }
+        Ok(())
+    }
 
     // Helper function for time validation
-    // fn validate_price_age(
-    //     current_time: i64,
-    //     publish_time: i64,
-    //     max_age_sec: u32,
-    // ) -> TYieldResult<()> {
-    //     let age_sec = current_time.safe_sub(publish_time)?;
-    //     if age_sec > max_age_sec as i64 {
-    //         return Err(crate::error::ErrorCode::MathError);
-    //     }
-    //     Ok(())
-    // }
+    pub fn validate_price_age(
+        current_time: i64,
+        publish_time: i64,
+        max_age_sec: u32,
+    ) -> TYieldResult<()> {
+        let age_sec = current_time.safe_sub(publish_time)?;
+        if age_sec > max_age_sec as i64 {
+            return Err(crate::error::ErrorCode::MathError);
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

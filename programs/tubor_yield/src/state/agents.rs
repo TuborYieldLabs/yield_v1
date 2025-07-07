@@ -40,7 +40,7 @@ impl Agent {
         self.mint = mint;
         self.owner = owner;
         self.booster = booster;
-        self.is_listed = false;
+        self.is_listed = true;
         self.created_at = current_time;
         self.last_updated = current_time;
         self.bump = bump;
@@ -317,7 +317,7 @@ mod tests {
         assert_eq!(agent.booster, booster);
         assert_eq!(agent.created_at, current_time);
         assert_eq!(agent.last_updated, current_time);
-        assert_eq!(agent.is_listed, false);
+        assert_eq!(agent.is_listed, true);
         assert_eq!(agent.bump, bump);
     }
 
@@ -339,9 +339,9 @@ mod tests {
             .unwrap();
 
         // Test listing
-        assert!(!agent.is_listed_for_trading());
+        assert!(agent.is_listed_for_trading());
         let result = agent.list(current_time + 3600);
-        assert!(result.is_ok());
+        assert!(result.is_err());
         assert!(agent.is_listed_for_trading());
 
         // Test unlisting

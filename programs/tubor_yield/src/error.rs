@@ -50,6 +50,8 @@ pub enum ErrorCode {
     InvalidStopLossBuy,
     #[msg("Stop loss must be higher than entry price for sell orders")]
     InvalidStopLossSell,
+    #[msg("This referrer is not a user")]
+    ReferrerNotAUser,
 }
 
 #[macro_export]

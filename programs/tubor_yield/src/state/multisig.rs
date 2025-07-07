@@ -41,6 +41,7 @@ pub enum AdminInstruction {
     BanUser,
     PermManager,
     WithdrawFees,
+    OpenTrade,
 }
 
 impl Size for Multisig {

@@ -1,16 +1,19 @@
-use anchor_lang::prelude::*;
+use crate::program::Tuboryield;
+
 use mpl_token_metadata::{
     instructions::{CreateV1CpiBuilder, MintV1CpiBuilder},
-    types::{Creator, PrintSupply, TokenStandard as MetaplexTokenStandard},
+    types::{Collection, Creator, PrintSupply, TokenStandard as MetaplexTokenStandard},
 };
 
-use crate::{
-    error::{ErrorCode, TYieldResult},
-    instructions::{MintMasterAgent, MintMasterAgentParams},
-    math::{Cast, SafeMath},
-    program::TuborYield,
-    state::{OracleParams, Size},
-    try_from,
+use {
+    crate::{
+        error::{ErrorCode, TYieldResult},
+        instructions::{MintAgent, MintAgentParams, MintMasterAgent, MintMasterAgentParams},
+        math::{Cast, SafeMath},
+        state::{OracleParams, Size},
+        try_from,
+    },
+    anchor_lang::prelude::*,
 };
 
 #[derive(Copy, Clone, PartialEq, AnchorSerialize, AnchorDeserialize, Default, Debug)]
@@ -29,6 +32,7 @@ pub struct TYield {
     pub y_mint: Pubkey,             // 32 bytes
     pub buy_tax: u64,               // 8 bytes
     pub sell_tax: u64,              // 8 bytes
+    pub ref_earn_percentage: u64,
 
     // 4-byte aligned fields
     pub inception_time: i32, // 4 bytes
@@ -66,7 +70,7 @@ impl TYield {
     pub fn validate_upgrade_authority(
         expected_upgrade_authority: Pubkey,
         program_data: &AccountInfo,
-        program: &Program<TuborYield>,
+        program: &Program<Tuboryield>,
     ) -> Result<()> {
         if let Some(programdata_address) = program.programdata_address()? {
             require_keys_eq!(
@@ -222,7 +226,7 @@ impl TYield {
 
     pub fn mint_master_agent(
         &self,
-        ctx: Context<MintMasterAgent>,
+        ctx: &Context<MintMasterAgent>,
         params: MintMasterAgentParams,
     ) -> Result<()> {
         let authority_seeds: &[&[&[u8]]] =
@@ -272,10 +276,79 @@ impl TYield {
 
         Ok(())
     }
+
+    pub fn mint_agent(&self, ctx: &Context<MintAgent>, params: MintAgentParams) -> Result<()> {
+        let authority_seeds: &[&[&[u8]]] =
+            &[&[b"transfer_authority", &[self.transfer_authority_bump]]];
+
+        let creators = vec![Creator {
+            address: ctx.accounts.authority.key(),
+            verified: true,
+            share: 100,
+        }];
+
+        CreateV1CpiBuilder::new(&ctx.accounts.metadata_program)
+            .metadata(&ctx.accounts.metadata)
+            .mint(&ctx.accounts.mint.to_account_info(), true)
+            .authority(&ctx.accounts.authority)
+            .payer(&ctx.accounts.payer)
+            .update_authority(&ctx.accounts.authority, true)
+            .master_edition(Some(&ctx.accounts.master_edition))
+            .name(params.name)
+            .symbol(params.symbol)
+            .uri(params.uri)
+            .seller_fee_basis_points(params.seller_fee_basis_points)
+            .creators(creators)
+            .token_standard(MetaplexTokenStandard::NonFungible)
+            .print_supply(PrintSupply::Zero)
+            .spl_token_program(Some(&ctx.accounts.token_program))
+            .system_program(&ctx.accounts.system_program)
+            .sysvar_instructions(&ctx.accounts.sysvar_instructions)
+            .collection(Collection {
+                key: ctx.accounts.master_agent_mint.key(),
+                verified: false,
+            })
+            .decimals(0)
+            .is_mutable(true)
+            .invoke_signed(authority_seeds)?;
+
+        // // Mint the NFT
+        MintV1CpiBuilder::new(&ctx.accounts.metadata_program)
+            .token(&ctx.accounts.token_account.to_account_info())
+            .token_owner(Some(&ctx.accounts.authority))
+            .master_edition(Some(&ctx.accounts.master_edition))
+            .mint(&ctx.accounts.mint.to_account_info())
+            .authority(&ctx.accounts.authority)
+            .payer(&ctx.accounts.payer)
+            .amount(1)
+            .system_program(&ctx.accounts.system_program)
+            .spl_token_program(&ctx.accounts.token_program)
+            .spl_ata_program(&ctx.accounts.associated_token_program)
+            .sysvar_instructions(&ctx.accounts.sysvar_instructions)
+            .invoke_signed(authority_seeds)?;
+        Ok(())
+    }
 }
 
 impl Size for TYield {
-    const SIZE: usize = 184; // 8 (discriminator) + 176 (struct fields) = 184 bytes
+    // Calculation:
+    // OracleParams: 109 bytes
+    // y_mint: 32
+    // buy_tax: 8
+    // sell_tax: 8
+    // ref_earn_percentage: 8
+    // inception_time: 4
+    // permissions: 4
+    // transfer_authority_bump: 1
+    // t_yield_bump: 1
+    // _padding: 6
+    // Total: 109+32+8+8+8+4+4+1+1+6 = 181
+    // But OracleParams has extra padding (see its definition):
+    // OracleParams: 32+32+8+4+1+3+29 = 109 (already includes padding)
+    // So sum: 109+32+8+8+8+4+4+1+1+6 = 181
+    // But std::mem::size_of::<TYield>() is likely 184 (due to alignment)
+    // So 8 + 184 = 192
+    const SIZE: usize = 192; // 8 (discriminator) + 184 (struct fields, including alignment) = 192 bytes
 }
 
 #[cfg(test)]

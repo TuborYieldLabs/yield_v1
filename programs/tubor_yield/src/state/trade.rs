@@ -6,6 +6,7 @@ use crate::math::PERCENTAGE_PRECISION_U64;
 use crate::state::Size;
 
 #[account]
+#[derive(Eq, PartialEq, Debug, Default)]
 pub struct Trade {
     // 8-byte aligned fields first
     pub master_agent: Pubkey, // 32 bytes (8-byte aligned)
@@ -14,6 +15,7 @@ pub struct Trade {
     pub take_profit: u64,     // 8 bytes
     pub stop_loss: u64,       // 8 bytes
     pub created_at: i32,      // 4 bytes
+    pub updated_at: i32,      // 4 bytes
     pub pair: [u8; 8],        // 8 bytes
     pub feed_id: [u8; 32],    // 32 bytes
     pub status: u8,           // 1 byte
@@ -44,7 +46,7 @@ pub enum TradeResult {
 }
 
 impl Size for Trade {
-    const SIZE: usize = 128; // 8 (discriminator) + 120 (struct fields) = 128 bytes
+    const SIZE: usize = 136;
 }
 
 #[event]
@@ -55,6 +57,24 @@ pub struct TradeEvent {
     pub result: TradeResult,
     pub pnl: u64,
     pub created_at: i64,
+}
+
+/// Parameters for initializing a Trade
+///
+#[derive(Clone, Copy)]
+pub struct TradeInitParams {
+    pub master_agent: Pubkey,
+    pub size: u64,
+    pub entry_price: u64,
+    pub take_profit: u64,
+    pub stop_loss: u64,
+    pub created_at: i32,
+    pub pair: [u8; 8],
+    pub feed_id: [u8; 32],
+    pub status: TradeStatus,
+    pub trade_type: TradeType,
+    pub result: TradeResult,
+    pub bump: u8,
 }
 
 impl Trade {
@@ -154,14 +174,14 @@ impl Trade {
     /// Calculates the potential profit/loss at a given price
     pub fn calculate_pnl(&self, current_price: u64) -> i64 {
         let price_diff = if self.is_buy() {
-            current_price.cast_signed() - self.entry_price.cast_signed()
+            current_price as i64 - self.entry_price as i64
         } else {
-            self.entry_price.cast_signed() - current_price.cast_signed()
+            self.entry_price as i64 - current_price as i64
         };
 
         // Calculate PnL based on size and price difference
         // Note: This is a simplified calculation - in practice you might want more sophisticated logic
-        (price_diff * self.size.cast_signed()) / self.entry_price.cast_signed()
+        (price_diff * self.size as i64) / self.entry_price as i64
     }
 
     /// Calculates the potential profit/loss at a given price with proper error handling
@@ -205,7 +225,7 @@ impl Trade {
         let percentage_numerator = price_diff.safe_mul(PERCENTAGE_PRECISION_U64)?;
         let percentage = percentage_numerator.safe_div(self.entry_price)?;
 
-        Ok(percentage.cast_signed())
+        Ok(percentage as i64)
     }
 
     /// Calculates the unrealized PnL if trade is closed at current price
@@ -289,6 +309,42 @@ impl Trade {
         // Convert the 32-byte array to a hex string
         self.feed_id.iter().map(|b| format!("{:02x}", b)).collect()
     }
+
+    /// Initializes the Trade in-place using a parameter struct
+    pub fn init_trade(&mut self, params: TradeInitParams) {
+        self.master_agent = params.master_agent;
+        self.size = params.size;
+        self.entry_price = params.entry_price;
+        self.take_profit = params.take_profit;
+        self.stop_loss = params.stop_loss;
+        self.created_at = params.created_at;
+        self.updated_at = params.created_at;
+        self.pair = params.pair;
+        self.feed_id = params.feed_id;
+        self.status = params.status as u8;
+        self.trade_type = params.trade_type as u8;
+        self.result = params.result as u8;
+        self.bump = params.bump;
+        self._padding = [0; 7];
+    }
+
+    /// Updates mutable fields of the trade and sets updated_at
+    pub fn update_trade(
+        &mut self,
+        size: u64,
+        take_profit: u64,
+        stop_loss: u64,
+        status: TradeStatus,
+        result: TradeResult,
+        updated_at: i32,
+    ) {
+        self.size = size;
+        self.take_profit = take_profit;
+        self.stop_loss = stop_loss;
+        self.set_status(status);
+        self.set_result(result);
+        self.updated_at = updated_at;
+    }
 }
 
 #[cfg(test)]
@@ -304,6 +360,7 @@ mod tests {
             take_profit: 1100,
             stop_loss: 900,
             created_at: 1000,
+            updated_at: 1000,
             pair: [65, 66, 67, 68, 69, 70, 71, 72], // "ABCDEFGH"
             feed_id: [1; 32],
             status: TradeStatus::Active as u8,
@@ -323,6 +380,7 @@ mod tests {
             take_profit: 900,
             stop_loss: 1100,
             created_at: 1000,
+            updated_at: 1000,
             pair: [65, 66, 67, 68, 69, 70, 71, 72], // "ABCDEFGH"
             feed_id: [1; 32],
             status: TradeStatus::Active as u8,
@@ -350,6 +408,7 @@ mod tests {
             take_profit: 0,
             stop_loss: 0,
             created_at: 0,
+            updated_at: 0,
             pair: [0; 8],
             feed_id: [0; 32],
             status: 0,
@@ -581,18 +640,14 @@ mod tests {
         );
 
         // Test the calculation step by step
-        let price_diff = trade.take_profit.safe_sub(trade.entry_price);
+        let price_diff = trade.take_profit as i64 - trade.entry_price as i64;
         println!("Price diff: {:?}", price_diff);
 
-        if let Ok(diff) = price_diff {
-            let pnl_numerator = diff.safe_mul(trade.size);
-            println!("PnL numerator: {:?}", pnl_numerator);
+        let pnl_numerator = price_diff * trade.size as i64;
+        println!("PnL numerator: {:?}", pnl_numerator);
 
-            if let Ok(numerator) = pnl_numerator {
-                let pnl = numerator.safe_div(trade.entry_price);
-                println!("Final PnL: {:?}", pnl);
-            }
-        }
+        let pnl = pnl_numerator / trade.entry_price as i64;
+        println!("Final PnL: {:?}", pnl);
     }
 
     #[test]
@@ -748,6 +803,7 @@ mod tests {
             take_profit: u64::MAX,
             stop_loss: 0,
             created_at: i32::MAX,
+            updated_at: i32::MAX,
             pair: [255; 8],
             feed_id: [255; 32],
             status: TradeStatus::Active as u8,
@@ -770,6 +826,7 @@ mod tests {
             take_profit: 2,
             stop_loss: 0,
             created_at: 0,
+            updated_at: 0,
             pair: [0; 8],
             feed_id: [0; 32],
             status: 0,
@@ -882,5 +939,73 @@ mod tests {
         // The result depends on the safe math implementation
         // We just test that it doesn't panic
         assert!(pnl.is_ok() || pnl.is_err());
+    }
+
+    #[test]
+    fn test_init_trade() {
+        let params = TradeInitParams {
+            master_agent: Pubkey::new_unique(),
+            size: 123,
+            entry_price: 456,
+            take_profit: 789,
+            stop_loss: 321,
+            created_at: 1111,
+            pair: [1, 2, 3, 4, 5, 6, 7, 8],
+            feed_id: [9; 32],
+            status: TradeStatus::Active,
+            trade_type: TradeType::Sell,
+            result: TradeResult::Pending,
+            bump: 2,
+        };
+        let mut trade = Trade::default();
+        trade.init_trade(params);
+        assert_eq!(trade.master_agent, params.master_agent);
+        assert_eq!(trade.size, params.size);
+        assert_eq!(trade.entry_price, params.entry_price);
+        assert_eq!(trade.take_profit, params.take_profit);
+        assert_eq!(trade.stop_loss, params.stop_loss);
+        assert_eq!(trade.created_at, params.created_at);
+        assert_eq!(trade.updated_at, params.created_at);
+        assert_eq!(trade.pair, params.pair);
+        assert_eq!(trade.feed_id, params.feed_id);
+        assert_eq!(trade.get_status(), params.status);
+        assert_eq!(trade.get_trade_type(), params.trade_type);
+        assert_eq!(trade.get_result(), params.result);
+        assert_eq!(trade.bump, params.bump);
+    }
+
+    #[test]
+    fn test_update_trade() {
+        let params = TradeInitParams {
+            master_agent: Pubkey::new_unique(),
+            size: 100,
+            entry_price: 1000,
+            take_profit: 1100,
+            stop_loss: 900,
+            created_at: 1000,
+            pair: [1, 2, 3, 4, 5, 6, 7, 8],
+            feed_id: [1; 32],
+            status: TradeStatus::Active,
+            trade_type: TradeType::Buy,
+            result: TradeResult::Pending,
+            bump: 1,
+        };
+        let mut trade = Trade::default();
+        trade.init_trade(params);
+        // Update fields
+        trade.update_trade(
+            200,  // size
+            1200, // take_profit
+            800,  // stop_loss
+            TradeStatus::Completed,
+            TradeResult::Success,
+            2000, // updated_at
+        );
+        assert_eq!(trade.size, 200);
+        assert_eq!(trade.take_profit, 1200);
+        assert_eq!(trade.stop_loss, 800);
+        assert_eq!(trade.get_status(), TradeStatus::Completed);
+        assert_eq!(trade.get_result(), TradeResult::Success);
+        assert_eq!(trade.updated_at, 2000);
     }
 }

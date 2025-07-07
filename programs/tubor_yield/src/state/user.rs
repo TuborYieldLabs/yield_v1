@@ -36,7 +36,7 @@ pub struct User {
     /// Padding to align to 8-byte boundary
     pub _padding1: [u8; 2],
 
-    /// Referrer's public key (zero if no referrer)
+    /// Referrer's public key (zero if no referrer) : The user who referred this user
     pub referrer: Pubkey,
 
     pub history: History,
@@ -500,73 +500,28 @@ impl History {
 }
 
 #[account]
-#[derive(Eq, PartialEq, Debug)]
+#[derive(Eq, PartialEq, Debug, Default)]
 pub struct ReferralRegistry {
-    /// The referrer's public key
+    /// The Pubkey of the user who owns this registry
     pub referrer: Pubkey,
-
-    /// Total number of users referred by this referrer
     pub total_referred_users: u32,
 
-    /// Total referral earnings earned by this referrer
-    /// precision: QUOTE_PRECISION
+    /// PRECISION : QUOTE PRECISION
     pub total_referral_earnings: u64,
+    /// PRECISION : QUOTE PRECISION
+    pub total_referral_earnings_uc: u64, // Unclaimed
 
-    /// List of referred users (limited to prevent account size issues)
-    pub referred_users: [Pubkey; 100], // Max 100 referred users per referrer
-
-    /// Timestamp when this registry was created
     pub created_at: i32,
-
-    /// Last time this registry was updated
     pub updated_at: i32,
 
     pub bump: u8,
-
-    /// Padding to align to 8-byte boundary
     pub _padding: [u8; 3],
+    // Note: Individual referrals are tracked via separate ReferralLink accounts.
 }
 
 impl ReferralRegistry {
-    pub fn is_user_referred(&self, authority: Pubkey) -> bool {
-        for i in 0..self.total_referred_users as usize {
-            if self.referred_users[i] == authority {
-                return true;
-            }
-        }
-        false
-    }
-
-    // Add a new referred user
-    pub fn add_referred_user(&mut self, user_authority: Pubkey) -> TYieldResult<()> {
-        if self.total_referred_users >= 100 {
-            return Err(ErrorCode::InvalidAccount);
-        }
-        if self.is_user_referred(user_authority) {
-            return Err(ErrorCode::InvalidAccount);
-        }
-
-        let index = self.total_referred_users as usize;
-        self.referred_users[index] = user_authority;
-        self.total_referred_users = self.total_referred_users.safe_add(1)?;
-        Ok(())
-    }
-
-    // Remove a referred user (if needed)
-    pub fn remove_referred_user(&mut self, user_authority: Pubkey) -> TYieldResult<()> {
-        for i in 0..self.total_referred_users as usize {
-            if self.referred_users[i] == user_authority {
-                // Shift remaining users to fill the gap
-                for j in i..(self.total_referred_users as usize - 1) {
-                    self.referred_users[j] = self.referred_users[j + 1];
-                }
-                self.referred_users[self.total_referred_users as usize - 1] = Pubkey::default();
-                self.total_referred_users = self.total_referred_users.safe_sub(1)?;
-                return Ok(());
-            }
-        }
-        Err(ErrorCode::InvalidAccount)
-    }
+    // Note: To check if a user is referred, or to add/remove referrals, use ReferralLink accounts.
+    // This struct only keeps aggregate data for scalability and rent efficiency.
 
     // Add referral earnings
     pub fn add_referral_earnings(&mut self, earnings: u64) -> TYieldResult<()> {
@@ -584,45 +539,14 @@ impl ReferralRegistry {
             .unwrap_or(0)
     }
 
-    // Get referral success rate (users who earned vs total referred)
-    pub fn get_referral_success_rate(&self) -> u64 {
-        if self.total_referred_users == 0 {
-            return 0;
-        }
-        let users_with_earnings = self
-            .referred_users
-            .iter()
-            .take(self.total_referred_users as usize)
-            .filter(|&&user| user != Pubkey::default())
-            .count()
-            .cast_signed();
-
-        (users_with_earnings as u64)
-            .safe_mul(100)
-            .unwrap_or(0)
-            .safe_div(self.total_referred_users as u64)
-            .unwrap_or(0)
-    }
-
-    // Get top referred users by some metric (placeholder for future implementation)
-    pub fn get_top_referred_users(&self, limit: usize) -> Vec<Pubkey> {
-        self.referred_users
-            .iter()
-            .take(self.total_referred_users as usize)
-            .filter(|&&user| user != Pubkey::default())
-            .take(limit)
-            .cloned()
-            .collect()
-    }
-
-    // Check if registry is full
+    // Check if registry is full (arbitrary limit, can be removed)
     pub fn is_full(&self) -> bool {
-        self.total_referred_users >= 100
+        false // No fixed limit in new design
     }
 
-    // Get available slots
+    // Get available slots (not meaningful in new design)
     pub fn get_available_slots(&self) -> u32 {
-        100 - self.total_referred_users
+        u32::MAX // Unlimited in new design
     }
 
     // Update timestamp
@@ -651,20 +575,12 @@ impl ReferralRegistry {
         if self.updated_at < self.created_at {
             return Err(ErrorCode::InvalidAccount);
         }
-        if self.total_referred_users > 100 {
-            return Err(ErrorCode::InvalidAccount);
-        }
         Ok(())
     }
 
     // Reset methods for testing/debugging
     pub fn reset_earnings(&mut self) {
         self.total_referral_earnings = 0;
-    }
-
-    pub fn reset_referred_users(&mut self) {
-        self.total_referred_users = 0;
-        self.referred_users = [Pubkey::default(); 100];
     }
 
     // Get referral statistics
@@ -677,18 +593,65 @@ impl ReferralRegistry {
     }
 }
 
-impl Default for ReferralRegistry {
-    fn default() -> Self {
+#[account]
+#[derive(Debug)]
+pub struct ReferralLink {
+    pub referrer: Pubkey,
+    pub referred_user: Pubkey,
+
+    pub created_at: i32,
+
+    pub bump: u8,
+    pub _padding: [u8; 3],
+}
+
+impl Size for ReferralLink {
+    const SIZE: usize = 80; // 8 (discriminator) + 72 (struct, including padding) = 80 bytes
+}
+
+impl ReferralLink {
+    /// Create a new ReferralLink
+    pub fn new(referrer: Pubkey, referred_user: Pubkey, created_at: i32, bump: u8) -> Self {
         Self {
-            referrer: Pubkey::default(),
-            total_referred_users: 0,
-            total_referral_earnings: 0,
-            referred_users: [Pubkey::default(); 100],
-            created_at: 0,
-            updated_at: 0,
-            bump: 0,
+            referrer,
+            referred_user,
+            created_at,
+            bump,
             _padding: [0; 3],
         }
+    }
+
+    /// Validate the ReferralLink (basic checks)
+    pub fn validate(&self) -> TYieldResult<()> {
+        if self.referrer == Pubkey::default() {
+            return Err(ErrorCode::InvalidAccount);
+        }
+        if self.referred_user == Pubkey::default() {
+            return Err(ErrorCode::InvalidAccount);
+        }
+        if self.created_at <= 0 {
+            return Err(ErrorCode::InvalidAccount);
+        }
+        Ok(())
+    }
+
+    /// Get the age of the referral link in days
+    pub fn get_age_days(&self, current_time: i32) -> i32 {
+        (current_time - self.created_at) / 86400
+    }
+
+    /// Update the created_at timestamp (for migration/testing)
+    pub fn update_timestamp(&mut self, new_time: i32) {
+        self.created_at = new_time;
+    }
+
+    /// Reset the referral link (for testing/debugging)
+    pub fn reset(&mut self) {
+        self.referrer = Pubkey::default();
+        self.referred_user = Pubkey::default();
+        self.created_at = 0;
+        self.bump = 0;
+        self._padding = [0; 3];
     }
 }
 
@@ -708,7 +671,7 @@ impl Size for User {
 
 // implement SIZE const for ReferralRegistry
 impl Size for ReferralRegistry {
-    const SIZE: usize = 3264; // 8 (discriminator) + 3256 (struct, including padding) = 3264 bytes
+    const SIZE: usize = 72; // 8 (discriminator) + 64 (struct, including padding) = 72 bytes
 }
 
 #[event]
@@ -1142,72 +1105,18 @@ mod tests {
     fn test_referral_registry_basic() {
         let mut registry = ReferralRegistry::default();
         let referrer = Pubkey::new_unique();
-        let user1 = Pubkey::new_unique();
-        let user2 = Pubkey::new_unique();
+        let _user1 = Pubkey::new_unique();
+        let _user2 = Pubkey::new_unique();
 
         registry.referrer = referrer;
         registry.created_at = 1000;
         registry.updated_at = 1000;
+        registry.total_referred_users = 1; // Ensure average is not zero
 
         // Test adding users
-        registry.add_referred_user(user1).unwrap();
-        assert!(registry.is_user_referred(user1));
-        assert_eq!(registry.total_referred_users, 1);
-
-        registry.add_referred_user(user2).unwrap();
-        assert!(registry.is_user_referred(user2));
-        assert_eq!(registry.total_referred_users, 2);
-
-        // Test adding duplicate
-        let result = registry.add_referred_user(user1);
-        assert!(result.is_err());
-
-        // Test earnings
         registry.add_referral_earnings(1000).unwrap();
         assert_eq!(registry.total_referral_earnings, 1000);
-        assert_eq!(registry.get_average_earnings_per_user(), 500);
-    }
-
-    #[test]
-    fn test_referral_registry_removal() {
-        let mut registry = ReferralRegistry::default();
-        let user1 = Pubkey::new_unique();
-        let user2 = Pubkey::new_unique();
-        let user3 = Pubkey::new_unique();
-
-        registry.add_referred_user(user1).unwrap();
-        registry.add_referred_user(user2).unwrap();
-        registry.add_referred_user(user3).unwrap();
-
-        // Remove middle user
-        registry.remove_referred_user(user2).unwrap();
-        assert!(!registry.is_user_referred(user2));
-        assert!(registry.is_user_referred(user1));
-        assert!(registry.is_user_referred(user3));
-        assert_eq!(registry.total_referred_users, 2);
-
-        // Remove non-existent user
-        let result = registry.remove_referred_user(user2);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_referral_registry_limits() {
-        let mut registry = ReferralRegistry::default();
-
-        // Try to add more than 100 users
-        for _i in 0..100 {
-            let user = Pubkey::new_unique();
-            registry.add_referred_user(user).unwrap();
-        }
-
-        assert!(registry.is_full());
-        assert_eq!(registry.get_available_slots(), 0);
-
-        // Try to add one more
-        let user = Pubkey::new_unique();
-        let result = registry.add_referred_user(user);
-        assert!(result.is_err());
+        assert_eq!(registry.get_average_earnings_per_user(), 1000);
     }
 
     #[test]
@@ -1226,11 +1135,6 @@ mod tests {
         // Invalid timestamps
         registry.updated_at = registry.created_at - 1;
         assert!(registry.validate_registry().is_err());
-
-        // Too many users
-        registry.updated_at = registry.created_at;
-        registry.total_referred_users = 101;
-        assert!(registry.validate_registry().is_err());
     }
 
     #[test]
@@ -1239,19 +1143,15 @@ mod tests {
         registry.referrer = Pubkey::new_unique();
         registry.created_at = 1000;
         registry.updated_at = 1000;
+        registry.total_referred_users = 1; // Ensure average is not zero
 
-        // Add some users and earnings
-        for _i in 0..5 {
-            let user = Pubkey::new_unique();
-            registry.add_referred_user(user).unwrap();
-        }
-
+        // Add some earnings
         registry.add_referral_earnings(1000).unwrap();
 
         let stats = registry.get_referral_stats();
-        assert_eq!(stats.0, 5); // total users
+        assert_eq!(stats.0, 1); // total users
         assert_eq!(stats.1, 1000); // total earnings
-        assert_eq!(stats.2, 200); // average earnings
+        assert_eq!(stats.2, 1000); // average earnings
 
         // Test time functions
         let current_time = 2000;
@@ -1470,22 +1370,15 @@ mod tests {
 
         // Test with no users
         assert_eq!(registry.get_average_earnings_per_user(), 0);
-        assert_eq!(registry.get_referral_success_rate(), 0);
-        assert_eq!(registry.get_available_slots(), 100);
+        assert_eq!(registry.get_available_slots(), u32::MAX);
         assert!(!registry.is_full());
 
         // Test with one user and earnings
-        let user = Pubkey::new_unique();
-        registry.add_referred_user(user).unwrap();
+        let _user = Pubkey::new_unique();
+        registry.total_referred_users = 1; // Ensure average is not zero
         registry.add_referral_earnings(500).unwrap();
 
         assert_eq!(registry.get_average_earnings_per_user(), 500);
-        assert_eq!(registry.get_referral_success_rate(), 100); // 1 user with earnings
-
-        // Test top referred users
-        let top_users = registry.get_top_referred_users(5);
-        assert_eq!(top_users.len(), 1);
-        assert_eq!(top_users[0], user);
     }
 
     #[test]
@@ -1532,5 +1425,64 @@ mod tests {
 
         user.check_idle_status(1002, 1); // 2 > 1, should be idle
         assert!(user.is_idle());
+    }
+
+    #[test]
+    fn test_referral_link_creation_and_validation() {
+        let referrer = Pubkey::new_unique();
+        let referred_user = Pubkey::new_unique();
+        let created_at = 1_700_000_000;
+        let bump = 1;
+        let link = ReferralLink::new(referrer, referred_user, created_at, bump);
+        assert_eq!(link.referrer, referrer);
+        assert_eq!(link.referred_user, referred_user);
+        assert_eq!(link.created_at, created_at);
+        assert_eq!(link.bump, bump);
+        assert!(link.validate().is_ok());
+    }
+
+    #[test]
+    fn test_referral_link_invalid_cases() {
+        let valid_pk = Pubkey::new_unique();
+        let created_at = 1_700_000_000;
+        let bump = 1;
+        // Invalid referrer
+        let link = ReferralLink::new(Pubkey::default(), valid_pk, created_at, bump);
+        assert!(link.validate().is_err());
+        // Invalid referred_user
+        let link = ReferralLink::new(valid_pk, Pubkey::default(), created_at, bump);
+        assert!(link.validate().is_err());
+        // Invalid created_at
+        let link = ReferralLink::new(valid_pk, valid_pk, 0, bump);
+        assert!(link.validate().is_err());
+    }
+
+    #[test]
+    fn test_referral_link_age_and_update() {
+        let referrer = Pubkey::new_unique();
+        let referred_user = Pubkey::new_unique();
+        let created_at = 1_700_000_000;
+        let bump = 1;
+        let mut link = ReferralLink::new(referrer, referred_user, created_at, bump);
+        let current_time = created_at + 86400 * 5; // 5 days later
+        assert_eq!(link.get_age_days(current_time), 5);
+        // Update timestamp
+        link.update_timestamp(created_at + 86400 * 10);
+        assert_eq!(link.get_age_days(created_at + 86400 * 15), 5);
+    }
+
+    #[test]
+    fn test_referral_link_reset() {
+        let referrer = Pubkey::new_unique();
+        let referred_user = Pubkey::new_unique();
+        let created_at = 1_700_000_000;
+        let bump = 1;
+        let mut link = ReferralLink::new(referrer, referred_user, created_at, bump);
+        link.reset();
+        assert_eq!(link.referrer, Pubkey::default());
+        assert_eq!(link.referred_user, Pubkey::default());
+        assert_eq!(link.created_at, 0);
+        assert_eq!(link.bump, 0);
+        assert_eq!(link._padding, [0; 3]);
     }
 }

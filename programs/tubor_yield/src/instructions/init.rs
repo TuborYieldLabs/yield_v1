@@ -1,13 +1,15 @@
-use anchor_lang::prelude::*;
+use crate::program::Tuboryield;
 use anchor_spl::{
     associated_token::AssociatedToken,
     token::{Token, TokenAccount},
 };
 
-use crate::{
-    error::TYieldResult,
-    program::TuborYield,
-    state::{Multisig, Size, TYield},
+use {
+    crate::{
+        error::TYieldResult,
+        state::{Multisig, Size, TYield},
+    },
+    anchor_lang::prelude::*,
 };
 
 #[derive(AnchorSerialize, AnchorDeserialize, Copy, Clone)]
@@ -19,6 +21,7 @@ pub struct InitParams {
     pub allow_withdraw_yield: bool,
     pub buy_tax: u64,
     pub sell_tax: u64,
+    pub ref_earn_percentage: u64,
     pub supported_mint: Pubkey,
 }
 
@@ -46,6 +49,7 @@ pub struct Init<'info> {
     )]
     pub t_yield: Box<Account<'info, TYield>>,
 
+    /// CHECK: This is safe because transfer_authority is a program-derived address (PDA) controlled by the program and is only used as an authority for token operations.
     #[account(
         init,
         payer = upgrade_authority,
@@ -59,7 +63,7 @@ pub struct Init<'info> {
     #[account()]
     pub t_yield_program_data: AccountInfo<'info>,
 
-    pub t_yield_program: Program<'info, TuborYield>,
+    pub t_yield_program: Program<'info, Tuboryield>,
 
     #[account(
         address = params.supported_mint

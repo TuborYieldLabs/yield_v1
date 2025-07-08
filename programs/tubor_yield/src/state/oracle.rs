@@ -1,12 +1,14 @@
 use std::cmp::Ordering;
 
 use anchor_lang::prelude::*;
+use pyth_solana_receiver_sdk::price_update::{PriceUpdateV2, TwapUpdate};
 
-use crate::error::TYieldResult;
+use crate::error::{ErrorCode, TYieldResult};
 use crate::math::constants::{ORACLE_EXPONENT_SCALE, ORACLE_MAX_PRICE, ORACLE_PRICE_SCALE};
 use crate::math::safe_math::SafeMath;
 use crate::math::{PERCENTAGE_PRECISION_U128, USD_DECIMALS};
-use crate::state::Size;
+use crate::state::{Size, TYield};
+use crate::try_from;
 
 #[derive(Copy, Clone, PartialEq, AnchorSerialize, AnchorDeserialize, Debug, Default)]
 pub enum OracleType {
@@ -106,6 +108,34 @@ impl OraclePrice {
         Self {
             price: amount_and_decimals.0,
             exponent: -(amount_and_decimals.1 as i32),
+        }
+    }
+
+    pub fn new_from_oracle(
+        price_update: &Account<PriceUpdateV2>,
+        twap_update: Option<&Account<TwapUpdate>>,
+        oracle_params: &OracleParams,
+        current_time: i64,
+        use_ema: bool,
+        feed_id: [u8; 32],
+    ) -> Result<Self> {
+        match oracle_params.oracle_type {
+            OracleType::Custom => Self::get_custom_price(
+                &price_update.to_account_info(),
+                oracle_params.max_price_error,
+                oracle_params.max_price_age_sec,
+                current_time,
+                use_ema,
+            ),
+            OracleType::Pyth => Self::get_pyth_price(
+                price_update,
+                twap_update,
+                oracle_params.max_price_error,
+                oracle_params.max_price_age_sec,
+                current_time,
+                use_ema,
+                feed_id,
+            ),
         }
     }
 
@@ -285,6 +315,127 @@ impl OraclePrice {
             return Err(crate::error::ErrorCode::MathError);
         }
         Ok(())
+    }
+
+    // private helpers
+    fn get_custom_price(
+        custom_price_info: &AccountInfo,
+        max_price_error: u64,
+        max_price_age_sec: u32,
+        current_time: i64,
+        use_ema: bool,
+    ) -> Result<OraclePrice> {
+        require!(
+            !TYield::is_empty_account(custom_price_info)?,
+            ErrorCode::InvalidOracleAccount
+        );
+
+        let oracle_acc = try_from!(Account<CustomOracle>, custom_price_info)?;
+
+        let last_update_age_sec = current_time.safe_sub(oracle_acc.publish_time)?;
+        if last_update_age_sec > max_price_age_sec as i64 {
+            msg!("Error: Custom oracle price is stale");
+            return err!(ErrorCode::StaleOraclePrice);
+        }
+        let price = if use_ema {
+            oracle_acc.ema
+        } else {
+            oracle_acc.price
+        };
+
+        if price == 0
+            || (oracle_acc.conf as u128)
+                .safe_mul(PERCENTAGE_PRECISION_U128)?
+                .safe_div(price as u128)?
+                > max_price_error as u128
+        {
+            msg!("Error: Custom oracle price is out of bounds");
+            return err!(ErrorCode::InvalidOraclePrice);
+        }
+
+        Ok(OraclePrice {
+            // price is i64 and > 0 per check above
+            price,
+            exponent: oracle_acc.expo,
+        })
+    }
+
+    fn get_pyth_price(
+        price_update: &Account<PriceUpdateV2>,
+        twap_update: Option<&Account<TwapUpdate>>,
+        max_price_error: u64,
+        max_price_age_sec: u32,
+        current_time: i64,
+        use_ema: bool,
+        feed_id: [u8; 32],
+    ) -> Result<OraclePrice> {
+        require!(
+            !TYield::is_empty_account(&price_update.to_account_info())?,
+            ErrorCode::InvalidOracleAccount
+        );
+
+        let maximum_age: u64 = 600;
+
+        let twap_price = match twap_update {
+            Some(twap) => Some(twap.get_twap_no_older_than(
+                &Clock::get()?,
+                maximum_age,
+                max_price_age_sec as u64,
+                &feed_id,
+            )?),
+            None => None,
+        };
+
+        let price = price_update.get_price_no_older_than(&Clock::get()?, maximum_age, &feed_id)?;
+
+        let final_price = if use_ema {
+            twap_price.ok_or(ErrorCode::MissingTwap)?.price
+        } else {
+            let publish_time: i64 = price.publish_time;
+
+            let last_update_age_sec = current_time.safe_sub(publish_time)?;
+
+            if last_update_age_sec > max_price_age_sec as i64 {
+                msg!("Error: Pyth oracle price is stale");
+                return err!(ErrorCode::StaleOraclePrice);
+            }
+
+            price.price
+        };
+
+        let final_exponent: i32 = if use_ema {
+            twap_price.ok_or(ErrorCode::MissingTwap)?.exponent
+        } else {
+            price.exponent
+        };
+
+        let conf_value = if use_ema {
+            twap_price.ok_or(ErrorCode::MissingTwap)?.conf
+        } else {
+            price.conf
+        };
+
+        if final_price == 0
+            || (conf_value as u128)
+                .safe_mul(PERCENTAGE_PRECISION_U128)?
+                .safe_div(final_price as u128)?
+                > max_price_error as u128
+        {
+            msg!("Error: Pyth oracle price is out of bounds");
+            return err!(ErrorCode::InvalidOraclePrice);
+        }
+
+        msg!(
+            "The price is ({} ± {}) * 10^{}",
+            final_price,
+            conf_value,
+            final_exponent
+        );
+
+        Ok(OraclePrice {
+            price: final_price as u64,
+            exponent: final_exponent,
+        })
     }
 }
 

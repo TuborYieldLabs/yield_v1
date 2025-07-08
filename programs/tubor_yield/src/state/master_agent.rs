@@ -18,6 +18,24 @@ pub struct MasterAgentInitParams {
     pub bump: u8,
 }
 
+/// Tax configuration for buy and sell operations
+#[derive(Debug, Clone)]
+pub struct TaxConfig {
+    pub buy_tax_percentage: u64,  // In basis points (e.g., 250 = 2.5%)
+    pub sell_tax_percentage: u64, // In basis points (e.g., 250 = 2.5%)
+    pub max_tax_percentage: u64,  // Maximum allowed tax percentage
+}
+
+impl Default for TaxConfig {
+    fn default() -> Self {
+        Self {
+            buy_tax_percentage: 250,  // 2.5% default buy tax
+            sell_tax_percentage: 250, // 2.5% default sell tax
+            max_tax_percentage: 1000, // 10% maximum tax
+        }
+    }
+}
+
 #[account]
 #[derive(Eq, PartialEq, Debug)]
 pub struct MasterAgent {
@@ -29,6 +47,11 @@ pub struct MasterAgent {
     pub max_supply: u64,   // 8 bytes
     pub agent_count: u64,  // 8 bytes
     pub trade_count: u64,  // 8 bytes
+
+    pub completed_trades: u64,
+
+    /// QUOTE PRECISION
+    pub total_pnl: u64,
 
     // 4-byte aligned fields
     pub last_updated: i32, // 4 bytes
@@ -392,6 +415,171 @@ impl MasterAgent {
             TradingStatus::Public => "Public".to_string(),
         }
     }
+
+    /// Calculate the expected buy price including taxes
+    /// Returns (total_price, tax_amount, base_price)
+    pub fn calculate_buy_price_with_tax(
+        &self,
+        tax_config: &TaxConfig,
+    ) -> TYieldResult<(u64, u64, u64)> {
+        if tax_config.buy_tax_percentage > tax_config.max_tax_percentage {
+            return Err(ErrorCode::MathError);
+        }
+
+        let base_price = self.price;
+        let tax_amount = base_price
+            .safe_mul(tax_config.buy_tax_percentage)?
+            .safe_div(PERCENTAGE_PRECISION_U64)?;
+        let total_price = base_price.safe_add(tax_amount)?;
+
+        Ok((total_price, tax_amount, base_price))
+    }
+
+    /// Calculate the expected sell price including taxes
+    /// Returns (net_price, tax_amount, base_price)
+    pub fn calculate_sell_price_with_tax(
+        &self,
+        tax_config: &TaxConfig,
+    ) -> TYieldResult<(u64, u64, u64)> {
+        if tax_config.sell_tax_percentage > tax_config.max_tax_percentage {
+            return Err(ErrorCode::MathError);
+        }
+
+        let base_price = self.price;
+        let tax_amount = base_price
+            .safe_mul(tax_config.sell_tax_percentage)?
+            .safe_div(PERCENTAGE_PRECISION_U64)?;
+        let net_price = base_price.safe_sub(tax_amount)?;
+
+        Ok((net_price, tax_amount, base_price))
+    }
+
+    /// Calculate buy price for a specific amount of USDC
+    /// Returns (tokens_received, tax_paid, base_amount)
+    pub fn calculate_buy_for_usdc_amount(
+        &self,
+        usdc_amount: u64,
+        tax_config: &TaxConfig,
+    ) -> TYieldResult<(u64, u64, u64)> {
+        if usdc_amount == 0 {
+            return Err(ErrorCode::InvalidEntryPrice);
+        }
+
+        // Calculate how many tokens can be bought with the USDC amount
+        let (total_price_per_token, tax_per_token, base_price_per_token) =
+            self.calculate_buy_price_with_tax(tax_config)?;
+
+        let tokens_received = usdc_amount.safe_div(total_price_per_token)?;
+        let _total_cost = tokens_received.safe_mul(total_price_per_token)?;
+        let tax_paid = tokens_received.safe_mul(tax_per_token)?;
+        let base_amount = tokens_received.safe_mul(base_price_per_token)?;
+
+        Ok((tokens_received, tax_paid, base_amount))
+    }
+
+    /// Calculate sell price for a specific number of tokens
+    /// Returns (usdc_received, tax_paid, base_amount)
+    pub fn calculate_sell_for_token_amount(
+        &self,
+        token_amount: u64,
+        tax_config: &TaxConfig,
+    ) -> TYieldResult<(u64, u64, u64)> {
+        if token_amount == 0 {
+            return Err(ErrorCode::InvalidEntryPrice);
+        }
+
+        // Calculate USDC received for the token amount
+        let (net_price_per_token, tax_per_token, base_price_per_token) =
+            self.calculate_sell_price_with_tax(tax_config)?;
+
+        let usdc_received = token_amount.safe_mul(net_price_per_token)?;
+        let tax_paid = token_amount.safe_mul(tax_per_token)?;
+        let base_amount = token_amount.safe_mul(base_price_per_token)?;
+
+        Ok((usdc_received, tax_paid, base_amount))
+    }
+
+    /// Calculate the effective tax rate for a buy transaction
+    pub fn get_buy_tax_rate(&self, tax_config: &TaxConfig) -> TYieldResult<u64> {
+        if tax_config.buy_tax_percentage > tax_config.max_tax_percentage {
+            return Err(ErrorCode::MathError);
+        }
+
+        let (_total_price, _, _) = self.calculate_buy_price_with_tax(tax_config)?;
+        let tax_rate =
+            (tax_config.buy_tax_percentage.safe_mul(100)?).safe_div(PERCENTAGE_PRECISION_U64)?;
+        Ok(tax_rate)
+    }
+
+    /// Calculate the effective tax rate for a sell transaction
+    pub fn get_sell_tax_rate(&self, tax_config: &TaxConfig) -> TYieldResult<u64> {
+        if tax_config.sell_tax_percentage > tax_config.max_tax_percentage {
+            return Err(ErrorCode::MathError);
+        }
+
+        let (_, _, _base_price) = self.calculate_sell_price_with_tax(tax_config)?;
+        let tax_rate =
+            (tax_config.sell_tax_percentage.safe_mul(100)?).safe_div(PERCENTAGE_PRECISION_U64)?;
+        Ok(tax_rate)
+    }
+
+    /// Calculate slippage impact on buy price
+    pub fn calculate_buy_price_with_slippage(
+        &self,
+        tax_config: &TaxConfig,
+        slippage_bps: u64, // Slippage in basis points
+    ) -> TYieldResult<(u64, u64)> {
+        let (base_total_price, _, _) = self.calculate_buy_price_with_tax(tax_config)?;
+
+        let slippage_amount = base_total_price
+            .safe_mul(slippage_bps)?
+            .safe_div(PERCENTAGE_PRECISION_U64)?;
+        let max_price = base_total_price.safe_add(slippage_amount)?;
+
+        Ok((base_total_price, max_price))
+    }
+
+    /// Calculate slippage impact on sell price
+    pub fn calculate_sell_price_with_slippage(
+        &self,
+        tax_config: &TaxConfig,
+        slippage_bps: u64, // Slippage in basis points
+    ) -> TYieldResult<(u64, u64)> {
+        let (base_net_price, _, _) = self.calculate_sell_price_with_tax(tax_config)?;
+
+        let slippage_amount = base_net_price
+            .safe_mul(slippage_bps)?
+            .safe_div(PERCENTAGE_PRECISION_U64)?;
+        let min_price = base_net_price.safe_sub(slippage_amount)?;
+
+        Ok((base_net_price, min_price))
+    }
+
+    /// Validate tax configuration
+    pub fn validate_tax_config(&self, tax_config: &TaxConfig) -> TYieldResult<()> {
+        if tax_config.buy_tax_percentage > tax_config.max_tax_percentage {
+            return Err(ErrorCode::MathError);
+        }
+        if tax_config.sell_tax_percentage > tax_config.max_tax_percentage {
+            return Err(ErrorCode::MathError);
+        }
+        if tax_config.max_tax_percentage > PERCENTAGE_PRECISION_U64 {
+            return Err(ErrorCode::MathError);
+        }
+        Ok(())
+    }
+
+    /// Get tax summary for display
+    pub fn get_tax_summary(&self, tax_config: &TaxConfig) -> TYieldResult<(u64, u64, u64)> {
+        self.validate_tax_config(tax_config)?;
+
+        let buy_tax_rate = self.get_buy_tax_rate(tax_config)?;
+        let sell_tax_rate = self.get_sell_tax_rate(tax_config)?;
+        let max_tax_rate =
+            (tax_config.max_tax_percentage.safe_mul(100)?).safe_div(PERCENTAGE_PRECISION_U64)?;
+
+        Ok((buy_tax_rate, sell_tax_rate, max_tax_rate))
+    }
 }
 
 impl Default for MasterAgent {
@@ -405,6 +593,8 @@ impl Default for MasterAgent {
             max_supply: 0,
             agent_count: 0,
             trade_count: 0,
+            completed_trades: 0,
+            total_pnl: 0,
             auto_relist: false,
             last_updated: 0,
             created_at: 0,
@@ -421,7 +611,7 @@ pub enum TradingStatus {
 }
 
 impl Size for MasterAgent {
-    const SIZE: usize = 136; // 8 (discriminator) + 128 (struct, including padding) = 136 bytes
+    const SIZE: usize = 152; // 8 (discriminator) + 144 (struct, including alignment/padding) = 152 bytes
 }
 
 #[cfg(test)]
@@ -455,7 +645,8 @@ mod tests {
     #[test]
     fn test_master_agent_size() {
         // On-chain size includes 8 bytes for Anchor discriminator
-        assert_eq!(8 + std::mem::size_of::<MasterAgent>(), MasterAgent::SIZE);
+        let expected_size = 8 + std::mem::size_of::<MasterAgent>();
+        assert_eq!(expected_size, MasterAgent::SIZE);
         println!("MasterAgent on-chain size: {} bytes", MasterAgent::SIZE);
     }
 
@@ -1127,5 +1318,232 @@ mod tests {
         // Test enum comparison
         assert_ne!(TradingStatus::WhiteList, TradingStatus::Public);
         assert_eq!(TradingStatus::WhiteList, TradingStatus::WhiteList);
+    }
+
+    #[test]
+    fn test_tax_config_default() {
+        let tax_config = TaxConfig::default();
+        assert_eq!(tax_config.buy_tax_percentage, 250); // 2.5%
+        assert_eq!(tax_config.sell_tax_percentage, 250); // 2.5%
+        assert_eq!(tax_config.max_tax_percentage, 1000); // 10%
+    }
+
+    #[test]
+    fn test_calculate_buy_price_with_tax() {
+        let master_agent = create_test_master_agent();
+        let tax_config = TaxConfig::default();
+
+        let (total_price, tax_amount, base_price) = master_agent
+            .calculate_buy_price_with_tax(&tax_config)
+            .unwrap();
+
+        assert_eq!(base_price, 1000000); // Base price
+        assert_eq!(tax_amount, 25000); // 2.5% of 1,000,000 = 25,000
+        assert_eq!(total_price, 1025000); // Base + tax
+    }
+
+    #[test]
+    fn test_calculate_sell_price_with_tax() {
+        let master_agent = create_test_master_agent();
+        let tax_config = TaxConfig::default();
+
+        let (net_price, tax_amount, base_price) = master_agent
+            .calculate_sell_price_with_tax(&tax_config)
+            .unwrap();
+
+        assert_eq!(base_price, 1000000); // Base price
+        assert_eq!(tax_amount, 25000); // 2.5% of 1,000,000 = 25,000
+        assert_eq!(net_price, 975000); // Base - tax
+    }
+
+    #[test]
+    fn test_calculate_buy_for_usdc_amount() {
+        let master_agent = create_test_master_agent();
+        let tax_config = TaxConfig::default();
+
+        // Test buying with 1,025,000 USDC (exactly 1 token with tax)
+        let (tokens_received, tax_paid, base_amount) = master_agent
+            .calculate_buy_for_usdc_amount(1025000, &tax_config)
+            .unwrap();
+
+        assert_eq!(tokens_received, 1);
+        assert_eq!(tax_paid, 25000); // 2.5% tax
+        assert_eq!(base_amount, 1000000); // Base amount
+    }
+
+    #[test]
+    fn test_calculate_sell_for_token_amount() {
+        let master_agent = create_test_master_agent();
+        let tax_config = TaxConfig::default();
+
+        // Test selling 1 token
+        let (usdc_received, tax_paid, base_amount) = master_agent
+            .calculate_sell_for_token_amount(1, &tax_config)
+            .unwrap();
+
+        assert_eq!(usdc_received, 975000); // Net after tax
+        assert_eq!(tax_paid, 25000); // 2.5% tax
+        assert_eq!(base_amount, 1000000); // Base amount
+    }
+
+    #[test]
+    fn test_get_buy_tax_rate() {
+        let master_agent = create_test_master_agent();
+        let tax_config = TaxConfig::default();
+
+        let tax_rate = master_agent.get_buy_tax_rate(&tax_config).unwrap();
+        assert_eq!(tax_rate, 2); // 2.5% = 2.5 basis points = 2%
+    }
+
+    #[test]
+    fn test_get_sell_tax_rate() {
+        let master_agent = create_test_master_agent();
+        let tax_config = TaxConfig::default();
+
+        let tax_rate = master_agent.get_sell_tax_rate(&tax_config).unwrap();
+        assert_eq!(tax_rate, 2); // 2.5% = 2.5 basis points = 2%
+    }
+
+    #[test]
+    fn test_calculate_buy_price_with_slippage() {
+        let master_agent = create_test_master_agent();
+        let tax_config = TaxConfig::default();
+        let slippage_bps = 100; // 1% slippage
+
+        let (base_price, max_price) = master_agent
+            .calculate_buy_price_with_slippage(&tax_config, slippage_bps)
+            .unwrap();
+
+        assert_eq!(base_price, 1025000); // Base price with tax
+        assert_eq!(max_price, 1035250); // Base + 1% slippage
+    }
+
+    #[test]
+    fn test_calculate_sell_price_with_slippage() {
+        let master_agent = create_test_master_agent();
+        let tax_config = TaxConfig::default();
+        let slippage_bps = 100; // 1% slippage
+
+        let (base_price, min_price) = master_agent
+            .calculate_sell_price_with_slippage(&tax_config, slippage_bps)
+            .unwrap();
+
+        assert_eq!(base_price, 975000); // Base price with tax
+        assert_eq!(min_price, 965250); // Base - 1% slippage
+    }
+
+    #[test]
+    fn test_validate_tax_config() {
+        let master_agent = create_test_master_agent();
+        let mut tax_config = TaxConfig::default();
+
+        // Test valid config
+        assert!(master_agent.validate_tax_config(&tax_config).is_ok());
+
+        // Test invalid buy tax
+        tax_config.buy_tax_percentage = 1500; // 15% > 10% max
+        assert!(master_agent.validate_tax_config(&tax_config).is_err());
+
+        // Reset and test invalid sell tax
+        tax_config = TaxConfig::default();
+        tax_config.sell_tax_percentage = 1500; // 15% > 10% max
+        assert!(master_agent.validate_tax_config(&tax_config).is_err());
+
+        // Reset and test invalid max tax
+        tax_config = TaxConfig::default();
+        tax_config.max_tax_percentage = PERCENTAGE_PRECISION_U64 + 1;
+        assert!(master_agent.validate_tax_config(&tax_config).is_err());
+    }
+
+    #[test]
+    fn test_get_tax_summary() {
+        let master_agent = create_test_master_agent();
+        let tax_config = TaxConfig::default();
+
+        let (buy_tax_rate, sell_tax_rate, max_tax_rate) =
+            master_agent.get_tax_summary(&tax_config).unwrap();
+
+        assert_eq!(buy_tax_rate, 2); // 2.5% = 2%
+        assert_eq!(sell_tax_rate, 2); // 2.5% = 2%
+        assert_eq!(max_tax_rate, 10); // 10%
+    }
+
+    #[test]
+    fn test_tax_calculations_with_different_rates() {
+        let master_agent = create_test_master_agent();
+        let mut tax_config = TaxConfig::default();
+        tax_config.buy_tax_percentage = 500; // 5%
+        tax_config.sell_tax_percentage = 300; // 3%
+
+        // Test buy price with 5% tax
+        let (total_price, tax_amount, base_price) = master_agent
+            .calculate_buy_price_with_tax(&tax_config)
+            .unwrap();
+
+        assert_eq!(base_price, 1000000);
+        assert_eq!(tax_amount, 50000); // 5% of 1,000,000
+        assert_eq!(total_price, 1050000);
+
+        // Test sell price with 3% tax
+        let (net_price, tax_amount, base_price) = master_agent
+            .calculate_sell_price_with_tax(&tax_config)
+            .unwrap();
+
+        assert_eq!(base_price, 1000000);
+        assert_eq!(tax_amount, 30000); // 3% of 1,000,000
+        assert_eq!(net_price, 970000);
+    }
+
+    #[test]
+    fn test_tax_calculations_edge_cases() {
+        let master_agent = create_test_master_agent();
+        let tax_config = TaxConfig::default();
+
+        // Test zero USDC amount
+        let result = master_agent.calculate_buy_for_usdc_amount(0, &tax_config);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), ErrorCode::InvalidEntryPrice);
+
+        // Test zero token amount
+        let result = master_agent.calculate_sell_for_token_amount(0, &tax_config);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), ErrorCode::InvalidEntryPrice);
+
+        // Test maximum tax rate
+        let mut max_tax_config = TaxConfig::default();
+        max_tax_config.buy_tax_percentage = 1000; // 10%
+        max_tax_config.sell_tax_percentage = 1000; // 10%
+
+        let (total_price, tax_amount, _) = master_agent
+            .calculate_buy_price_with_tax(&max_tax_config)
+            .unwrap();
+
+        assert_eq!(tax_amount, 100000); // 10% of 1,000,000
+        assert_eq!(total_price, 1100000); // Base + 10% tax
+    }
+
+    #[test]
+    fn test_large_amount_calculations() {
+        let mut master_agent = create_test_master_agent();
+        master_agent.price = 1_000_000_000; // 1 billion lamports
+        let tax_config = TaxConfig::default();
+
+        // Test large buy calculation
+        let (total_price, tax_amount, base_price) = master_agent
+            .calculate_buy_price_with_tax(&tax_config)
+            .unwrap();
+
+        assert_eq!(base_price, 1_000_000_000);
+        assert_eq!(tax_amount, 25_000_000); // 2.5% of 1 billion
+        assert_eq!(total_price, 1_025_000_000);
+
+        // Test large sell calculation
+        let (net_price, tax_amount, base_price) = master_agent
+            .calculate_sell_price_with_tax(&tax_config)
+            .unwrap();
+
+        assert_eq!(base_price, 1_000_000_000);
+        assert_eq!(tax_amount, 25_000_000); // 2.5% of 1 billion
+        assert_eq!(net_price, 975_000_000);
     }
 }

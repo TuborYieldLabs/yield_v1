@@ -26,6 +26,13 @@ pub mod tuboryield {
         instructions::init(ctx, &params)
     }
 
+    pub fn update_trade<'info>(
+        ctx: Context<'_, '_, '_, 'info, UpdateTrade<'info>>,
+        params: UpdateTradeParams,
+    ) -> TYieldResult<u8> {
+        instructions::update_trade(ctx, params)
+    }
+
     // pub fn ban_user<'info>(
     //     ctx: Context<'_, '_, '_, 'info, ban_user::BanUser<'info>>,
     // ) -> error::TYieldResult<u8> {

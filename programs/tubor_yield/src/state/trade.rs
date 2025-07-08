@@ -3,7 +3,7 @@ use anchor_lang::prelude::*;
 use crate::error::{ErrorCode, TYieldResult};
 use crate::math::safe_math::SafeMath;
 use crate::math::PERCENTAGE_PRECISION_U64;
-use crate::state::Size;
+use crate::state::{OraclePrice, Size};
 
 #[account]
 #[derive(Eq, PartialEq, Debug, Default)]
@@ -75,6 +75,106 @@ pub struct TradeInitParams {
     pub trade_type: TradeType,
     pub result: TradeResult,
     pub bump: u8,
+}
+
+/// Comprehensive price validation parameters
+#[derive(Debug, Clone)]
+pub struct PriceValidationConfig {
+    pub max_slippage_bps: u64,
+    pub min_distance_bps: u64,
+    pub min_risk_reward_bps: u64,
+    pub max_deviation_bps: u64,
+    pub range_buffer_bps: u64,
+    pub spread_bps: u64,
+    pub slippage_buffer_bps: u64,
+}
+
+impl Default for PriceValidationConfig {
+    fn default() -> Self {
+        Self {
+            max_slippage_bps: 500,    // 5% maximum slippage
+            min_distance_bps: 100,    // 1% minimum distance for stop loss/take profit
+            min_risk_reward_bps: 150, // 1.5:1 minimum risk-reward ratio
+            max_deviation_bps: 200,   // 2% maximum oracle price deviation
+            range_buffer_bps: 50,     // 0.5% buffer for price range validation
+            spread_bps: 50,           // 0.5% spread
+            slippage_buffer_bps: 25,  // 0.25% slippage buffer
+        }
+    }
+}
+
+impl PriceValidationConfig {
+    /// Creates a conservative validation config for high-risk environments
+    pub fn conservative() -> Self {
+        Self {
+            max_slippage_bps: 200,    // 2% maximum slippage
+            min_distance_bps: 200,    // 2% minimum distance
+            min_risk_reward_bps: 200, // 2:1 minimum risk-reward ratio
+            max_deviation_bps: 100,   // 1% maximum oracle deviation
+            range_buffer_bps: 25,     // 0.25% buffer
+            spread_bps: 25,           // 0.25% spread
+            slippage_buffer_bps: 10,  // 0.1% slippage buffer
+        }
+    }
+
+    /// Creates an aggressive validation config for low-risk environments
+    pub fn aggressive() -> Self {
+        Self {
+            max_slippage_bps: 1000,   // 10% maximum slippage
+            min_distance_bps: 50,     // 0.5% minimum distance
+            min_risk_reward_bps: 100, // 1:1 minimum risk-reward ratio
+            max_deviation_bps: 500,   // 5% maximum oracle deviation
+            range_buffer_bps: 100,    // 1% buffer
+            spread_bps: 100,          // 1% spread
+            slippage_buffer_bps: 50,  // 0.5% slippage buffer
+        }
+    }
+
+    /// Creates a custom validation config with specific parameters
+    pub fn custom(
+        max_slippage_bps: u64,
+        min_distance_bps: u64,
+        min_risk_reward_bps: u64,
+        max_deviation_bps: u64,
+        range_buffer_bps: u64,
+        spread_bps: u64,
+        slippage_buffer_bps: u64,
+    ) -> Self {
+        Self {
+            max_slippage_bps,
+            min_distance_bps,
+            min_risk_reward_bps,
+            max_deviation_bps,
+            range_buffer_bps,
+            spread_bps,
+            slippage_buffer_bps,
+        }
+    }
+
+    /// Validates the configuration parameters
+    pub fn validate(&self) -> TYieldResult<()> {
+        if self.max_slippage_bps == 0 || self.min_distance_bps == 0 {
+            return Err(ErrorCode::MathError);
+        }
+        if self.max_slippage_bps < self.min_distance_bps {
+            return Err(ErrorCode::MathError);
+        }
+        Ok(())
+    }
+
+    /// Returns a human-readable description of the configuration
+    pub fn describe(&self) -> String {
+        format!(
+            "PriceValidationConfig {{ max_slippage: {}%, min_distance: {}%, min_risk_reward: {}:1, max_deviation: {}%, range_buffer: {}%, spread: {}%, slippage_buffer: {}% }}",
+            self.max_slippage_bps as f64 / 100.0,
+            self.min_distance_bps as f64 / 100.0,
+            self.min_risk_reward_bps as f64 / 100.0,
+            self.max_deviation_bps as f64 / 100.0,
+            self.range_buffer_bps as f64 / 100.0,
+            self.spread_bps as f64 / 100.0,
+            self.slippage_buffer_bps as f64 / 100.0,
+        )
+    }
 }
 
 impl Trade {
@@ -344,6 +444,372 @@ impl Trade {
         self.set_status(status);
         self.set_result(result);
         self.updated_at = updated_at;
+    }
+
+    /// Enhanced price validation with slippage protection
+    pub fn validate_price_with_slippage(
+        &self,
+        current_price: u64,
+        max_slippage_bps: u64,
+    ) -> TYieldResult<()> {
+        if current_price == 0 {
+            return Err(ErrorCode::PriceValidationFailed);
+        }
+
+        let price_diff = if current_price >= self.entry_price {
+            current_price.safe_sub(self.entry_price)?
+        } else {
+            self.entry_price.safe_sub(current_price)?
+        };
+
+        let slippage_bps = price_diff
+            .safe_mul(PERCENTAGE_PRECISION_U64)?
+            .safe_div(self.entry_price)?;
+
+        if slippage_bps > max_slippage_bps {
+            msg!(
+                "Price slippage {} bps exceeds maximum {} bps",
+                slippage_bps,
+                max_slippage_bps
+            );
+            return Err(ErrorCode::MaxPriceSlippage);
+        }
+
+        Ok(())
+    }
+
+    /// Validates that stop loss and take profit are sufficiently far from entry price
+    pub fn validate_risk_management_levels(&self, min_distance_bps: u64) -> TYieldResult<()> {
+        // Validate take profit distance
+        let tp_distance = if self.take_profit >= self.entry_price {
+            self.take_profit.safe_sub(self.entry_price)?
+        } else {
+            self.entry_price.safe_sub(self.take_profit)?
+        };
+
+        let tp_distance_bps = tp_distance
+            .safe_mul(PERCENTAGE_PRECISION_U64)?
+            .safe_div(self.entry_price)?;
+
+        if tp_distance_bps < min_distance_bps {
+            msg!(
+                "Take profit too close: {} bps < {} bps minimum",
+                tp_distance_bps,
+                min_distance_bps
+            );
+            return Err(ErrorCode::TakeProfitTooClose);
+        }
+
+        // Validate stop loss distance
+        let sl_distance = if self.stop_loss >= self.entry_price {
+            self.stop_loss.safe_sub(self.entry_price)?
+        } else {
+            self.entry_price.safe_sub(self.stop_loss)?
+        };
+
+        let sl_distance_bps = sl_distance
+            .safe_mul(PERCENTAGE_PRECISION_U64)?
+            .safe_div(self.entry_price)?;
+
+        if sl_distance_bps < min_distance_bps {
+            msg!(
+                "Stop loss too close: {} bps < {} bps minimum",
+                sl_distance_bps,
+                min_distance_bps
+            );
+            return Err(ErrorCode::StopLossTooClose);
+        }
+
+        Ok(())
+    }
+
+    /// Validates risk-reward ratio meets minimum requirements
+    pub fn validate_risk_reward_ratio(&self, min_ratio_bps: u64) -> TYieldResult<()> {
+        let ratio = self.calculate_risk_reward_ratio()?;
+
+        if ratio < min_ratio_bps {
+            msg!(
+                "Risk-reward ratio {} bps below minimum {} bps",
+                ratio,
+                min_ratio_bps
+            );
+            return Err(ErrorCode::InsufficientRiskRewardRatio);
+        }
+
+        Ok(())
+    }
+
+    /// Comprehensive price validation for trade execution
+    pub fn validate_trade_execution(
+        &self,
+        current_price: u64,
+        max_slippage_bps: u64,
+        min_distance_bps: u64,
+        min_risk_reward_bps: u64,
+    ) -> TYieldResult<()> {
+        // Basic trade validation
+        self.validate()?;
+
+        // Price slippage validation
+        self.validate_price_with_slippage(current_price, max_slippage_bps)?;
+
+        // Risk management levels validation
+        self.validate_risk_management_levels(min_distance_bps)?;
+
+        // Risk-reward ratio validation
+        self.validate_risk_reward_ratio(min_risk_reward_bps)?;
+
+        Ok(())
+    }
+
+    /// Validates oracle price against current market conditions
+    pub fn validate_oracle_price(
+        &self,
+        oracle_price: &OraclePrice,
+        max_deviation_bps: u64,
+    ) -> TYieldResult<()> {
+        let oracle_price_u64 = oracle_price.scale_to_exponent(0)?.price;
+
+        if oracle_price_u64 == 0 {
+            return Err(ErrorCode::PriceValidationFailed);
+        }
+
+        let price_diff = if oracle_price_u64 >= self.entry_price {
+            oracle_price_u64.safe_sub(self.entry_price)?
+        } else {
+            self.entry_price.safe_sub(oracle_price_u64)?
+        };
+
+        let deviation_bps = price_diff
+            .safe_mul(PERCENTAGE_PRECISION_U64)?
+            .safe_div(self.entry_price)?;
+
+        if deviation_bps > max_deviation_bps {
+            msg!(
+                "Oracle price deviation {} bps exceeds maximum {} bps",
+                deviation_bps,
+                max_deviation_bps
+            );
+            return Err(ErrorCode::PriceDeviationTooHigh);
+        }
+
+        Ok(())
+    }
+
+    /// Checks if current price is within acceptable trading range
+    pub fn is_price_in_range(
+        &self,
+        current_price: u64,
+        range_buffer_bps: u64,
+    ) -> TYieldResult<bool> {
+        if current_price == 0 {
+            return Err(ErrorCode::PriceValidationFailed);
+        }
+
+        let min_price = self.stop_loss.safe_sub(
+            self.stop_loss
+                .safe_mul(range_buffer_bps)?
+                .safe_div(PERCENTAGE_PRECISION_U64)?,
+        )?;
+
+        let max_price = self.take_profit.safe_add(
+            self.take_profit
+                .safe_mul(range_buffer_bps)?
+                .safe_div(PERCENTAGE_PRECISION_U64)?,
+        )?;
+
+        Ok(current_price >= min_price && current_price <= max_price)
+    }
+
+    /// Enhanced entry price calculation with spread adjustment
+    pub fn calculate_entry_price_with_spread(
+        &self,
+        oracle_price: &OraclePrice,
+        spread_bps: u64,
+        side: TradeType,
+    ) -> TYieldResult<u64> {
+        let base_price = oracle_price.scale_to_exponent(0)?.price;
+
+        if base_price == 0 {
+            return Err(ErrorCode::PriceValidationFailed);
+        }
+
+        let spread_amount = base_price
+            .safe_mul(spread_bps)?
+            .safe_div(PERCENTAGE_PRECISION_U64)?;
+
+        let entry_price = match side {
+            TradeType::Buy => base_price.safe_add(spread_amount)?,
+            TradeType::Sell => base_price.safe_sub(spread_amount)?,
+        };
+
+        if entry_price == 0 {
+            return Err(ErrorCode::PriceValidationFailed);
+        }
+
+        Ok(entry_price)
+    }
+
+    /// Validates that the trade can be executed at current market conditions
+    pub fn can_execute_trade(
+        &self,
+        current_price: u64,
+        oracle_price: &OraclePrice,
+        max_slippage_bps: u64,
+        max_deviation_bps: u64,
+        range_buffer_bps: u64,
+    ) -> TYieldResult<bool> {
+        // Check basic validation
+        if self.validate().is_err() {
+            return Ok(false);
+        }
+
+        // Check price slippage
+        if self
+            .validate_price_with_slippage(current_price, max_slippage_bps)
+            .is_err()
+        {
+            return Ok(false);
+        }
+
+        // Check oracle price deviation
+        if self
+            .validate_oracle_price(oracle_price, max_deviation_bps)
+            .is_err()
+        {
+            return Ok(false);
+        }
+
+        // Check if price is in acceptable range
+        if !self.is_price_in_range(current_price, range_buffer_bps)? {
+            return Ok(false);
+        }
+
+        Ok(true)
+    }
+
+    /// Calculates the optimal entry price based on current market conditions
+    pub fn calculate_optimal_entry_price(
+        &self,
+        oracle_price: &OraclePrice,
+        spread_bps: u64,
+        slippage_buffer_bps: u64,
+    ) -> TYieldResult<u64> {
+        let base_price = oracle_price.scale_to_exponent(0)?.price;
+
+        if base_price == 0 {
+            return Err(ErrorCode::PriceValidationFailed);
+        }
+
+        // Calculate spread-adjusted price
+        let spread_amount = base_price
+            .safe_mul(spread_bps)?
+            .safe_div(PERCENTAGE_PRECISION_U64)?;
+
+        let spread_adjusted_price = match self.get_trade_type() {
+            TradeType::Buy => base_price.safe_add(spread_amount)?,
+            TradeType::Sell => base_price.safe_sub(spread_amount)?,
+        };
+
+        // Add slippage buffer
+        let slippage_buffer = spread_adjusted_price
+            .safe_mul(slippage_buffer_bps)?
+            .safe_div(PERCENTAGE_PRECISION_U64)?;
+
+        let optimal_price = match self.get_trade_type() {
+            TradeType::Buy => spread_adjusted_price.safe_add(slippage_buffer)?,
+            TradeType::Sell => spread_adjusted_price.safe_sub(slippage_buffer)?,
+        };
+
+        if optimal_price == 0 {
+            return Err(ErrorCode::PriceValidationFailed);
+        }
+
+        Ok(optimal_price)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    /// Comprehensive trade validation with all checks
+    pub fn comprehensive_validation(
+        &self,
+        current_price: u64,
+        oracle_price: &OraclePrice,
+        max_slippage_bps: u64,
+        min_distance_bps: u64,
+        min_risk_reward_bps: u64,
+        max_deviation_bps: u64,
+        range_buffer_bps: u64,
+    ) -> TYieldResult<()> {
+        // Basic trade validation
+        self.validate()?;
+
+        // Price slippage validation
+        self.validate_price_with_slippage(current_price, max_slippage_bps)?;
+
+        // Risk management levels validation
+        self.validate_risk_management_levels(min_distance_bps)?;
+
+        // Risk-reward ratio validation
+        self.validate_risk_reward_ratio(min_risk_reward_bps)?;
+
+        // Oracle price validation
+        self.validate_oracle_price(oracle_price, max_deviation_bps)?;
+
+        // Price range validation
+        if !self.is_price_in_range(current_price, range_buffer_bps)? {
+            return Err(ErrorCode::PriceOutOfRange);
+        }
+
+        Ok(())
+    }
+
+    /// Enhanced validation using configuration struct
+    pub fn validate_with_config(
+        &self,
+        current_price: u64,
+        oracle_price: &OraclePrice,
+        config: &PriceValidationConfig,
+    ) -> TYieldResult<()> {
+        config.validate()?;
+
+        self.comprehensive_validation(
+            current_price,
+            oracle_price,
+            config.max_slippage_bps,
+            config.min_distance_bps,
+            config.min_risk_reward_bps,
+            config.max_deviation_bps,
+            config.range_buffer_bps,
+        )
+    }
+
+    /// Calculates optimal entry price using configuration
+    pub fn calculate_optimal_price_with_config(
+        &self,
+        oracle_price: &OraclePrice,
+        config: &PriceValidationConfig,
+    ) -> TYieldResult<u64> {
+        self.calculate_optimal_entry_price(
+            oracle_price,
+            config.spread_bps,
+            config.slippage_buffer_bps,
+        )
+    }
+
+    /// Validates trade execution with configuration
+    pub fn can_execute_with_config(
+        &self,
+        current_price: u64,
+        oracle_price: &OraclePrice,
+        config: &PriceValidationConfig,
+    ) -> TYieldResult<bool> {
+        self.can_execute_trade(
+            current_price,
+            oracle_price,
+            config.max_slippage_bps,
+            config.max_deviation_bps,
+            config.range_buffer_bps,
+        )
     }
 }
 
@@ -1007,5 +1473,195 @@ mod tests {
         assert_eq!(trade.get_status(), TradeStatus::Completed);
         assert_eq!(trade.get_result(), TradeResult::Success);
         assert_eq!(trade.updated_at, 2000);
+    }
+
+    #[test]
+    fn test_validate_price_with_slippage() {
+        let trade = create_valid_buy_trade();
+        let current_price = 1000;
+        let max_slippage_bps = 100;
+        let result = trade.validate_price_with_slippage(current_price, max_slippage_bps);
+        assert!(result.is_ok());
+
+        let current_price = 0;
+        let result = trade.validate_price_with_slippage(current_price, max_slippage_bps);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_risk_management_levels() {
+        let trade = create_valid_buy_trade();
+        let min_distance_bps = 100;
+        let result = trade.validate_risk_management_levels(min_distance_bps);
+        assert!(result.is_ok());
+
+        // Create a trade with very close stop loss
+        let mut close_trade = create_valid_buy_trade();
+        close_trade.stop_loss = 999; // Very close to entry price
+        let result = close_trade.validate_risk_management_levels(min_distance_bps);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_risk_reward_ratio() {
+        let trade = create_valid_buy_trade();
+        let min_ratio_bps = 100;
+        let result = trade.validate_risk_reward_ratio(min_ratio_bps);
+        assert!(result.is_ok());
+
+        // Create a trade with poor risk-reward ratio
+        let mut poor_trade = create_valid_buy_trade();
+        poor_trade.take_profit = 1001; // Very close to entry price
+        poor_trade.stop_loss = 999; // Very close to entry price
+        let result = poor_trade.validate_risk_reward_ratio(min_ratio_bps);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_trade_execution() {
+        let trade = create_valid_buy_trade();
+        let current_price = 1000;
+        let max_slippage_bps = 100;
+        let min_distance_bps = 100;
+        let min_risk_reward_bps = 100;
+        let result = trade.validate_trade_execution(
+            current_price,
+            max_slippage_bps,
+            min_distance_bps,
+            min_risk_reward_bps,
+        );
+        assert!(result.is_ok());
+
+        let current_price = 0;
+        let result = trade.validate_trade_execution(
+            current_price,
+            max_slippage_bps,
+            min_distance_bps,
+            min_risk_reward_bps,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_calculate_optimal_entry_price() {
+        let trade = create_valid_buy_trade();
+        let oracle_price = OraclePrice {
+            price: 1000,
+            exponent: 0,
+        };
+        let spread_bps = 100;
+        let slippage_buffer_bps = 50;
+        let result =
+            trade.calculate_optimal_entry_price(&oracle_price, spread_bps, slippage_buffer_bps);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 1015); // 1000 + 10 + 5
+
+        let slippage_buffer_bps = u64::MAX; // This should cause overflow
+        let result =
+            trade.calculate_optimal_entry_price(&oracle_price, spread_bps, slippage_buffer_bps);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_calculate_optimal_price_with_config() {
+        let trade = create_valid_buy_trade();
+        let oracle_price = OraclePrice {
+            price: 1000,
+            exponent: 0,
+        };
+        let config = PriceValidationConfig::default();
+
+        let result = trade.calculate_optimal_price_with_config(&oracle_price, &config);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 1007); // 1000 + 5 + 2
+
+        // Test with conservative config
+        let conservative_config = PriceValidationConfig::conservative();
+        let result = trade.calculate_optimal_price_with_config(&oracle_price, &conservative_config);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 1003); // 1000 + 2 + 1
+    }
+
+    #[test]
+    fn test_comprehensive_validation() {
+        let trade = create_valid_buy_trade();
+        let current_price = 1000;
+        let oracle_price = OraclePrice {
+            price: 1000,
+            exponent: 0,
+        };
+        let max_slippage_bps = 100;
+        let min_distance_bps = 100;
+        let min_risk_reward_bps = 100;
+        let max_deviation_bps = 100;
+        let range_buffer_bps = 100;
+        let result = trade.comprehensive_validation(
+            current_price,
+            &oracle_price,
+            max_slippage_bps,
+            min_distance_bps,
+            min_risk_reward_bps,
+            max_deviation_bps,
+            range_buffer_bps,
+        );
+        assert!(result.is_ok());
+
+        let current_price = 2000; // triggers slippage error
+        let result = trade.comprehensive_validation(
+            current_price,
+            &oracle_price,
+            max_slippage_bps,
+            min_distance_bps,
+            min_risk_reward_bps,
+            max_deviation_bps,
+            range_buffer_bps,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_with_config() {
+        let trade = create_valid_buy_trade();
+        let current_price = 1000;
+        let oracle_price = OraclePrice {
+            price: 1000,
+            exponent: 0,
+        };
+        let config = PriceValidationConfig::default();
+
+        let result = trade.validate_with_config(current_price, &oracle_price, &config);
+        assert!(result.is_ok());
+
+        // Test with conservative config
+        let conservative_config = PriceValidationConfig::conservative();
+        let result = trade.validate_with_config(current_price, &oracle_price, &conservative_config);
+        assert!(result.is_ok());
+
+        // Test with aggressive config
+        let aggressive_config = PriceValidationConfig::aggressive();
+        let result = trade.validate_with_config(current_price, &oracle_price, &aggressive_config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_can_execute_with_config() {
+        let trade = create_valid_buy_trade();
+        let current_price = 1000;
+        let oracle_price = OraclePrice {
+            price: 1000,
+            exponent: 0,
+        };
+        let config = PriceValidationConfig::default();
+
+        let result = trade.can_execute_with_config(current_price, &oracle_price, &config);
+        assert!(result.is_ok());
+        assert!(result.unwrap());
+
+        // Test with conservative config
+        let conservative_config = PriceValidationConfig::conservative();
+        let result =
+            trade.can_execute_with_config(current_price, &oracle_price, &conservative_config);
+        assert!(result.is_ok());
+        assert!(result.unwrap());
     }
 }

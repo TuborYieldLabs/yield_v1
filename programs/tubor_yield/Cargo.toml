@@ -23,3 +23,4 @@ mpl-token-metadata = "5.1.0"
 uint = { version = "0.10.0", default-features = false }
 bytemuck = "1.23.1"
 num-traits = "0.2.15"
+pyth-solana-receiver-sdk="0.6.1"

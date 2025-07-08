@@ -1,6 +1,7 @@
 use anchor_lang::prelude::*;
+use pyth_solana_receiver_sdk::price_update::{PriceUpdateV2, TwapUpdate};
 
-use crate::{error::{ErrorCode, TYieldResult}, state::{trade::{Trade, TradeInitParams, TradeResult, TradeStatus, TradeType}, AdminInstruction, MasterAgent, Multisig, Size, TYield}};
+use crate::{error::{ErrorCode, TYieldResult}, math::SafeMath, state::{ trade::{PriceValidationConfig, Trade, TradeInitParams, TradeResult, TradeStatus, TradeType}, AdminInstruction, MasterAgent, Multisig, OraclePrice, Size, TYield}};
 
 #[derive(AnchorSerialize, AnchorDeserialize)]
 pub struct OpenTradeParams {
@@ -41,8 +42,8 @@ pub struct OpenTrade<'info> {
     )]
     pub t_yield: Account<'info, TYield>,
 
-    // pub pair_oracle_account: Account<'info, PriceUpdateV2>,
-    // pub pair_twap_account: Option<Account<'info, TwapUpdate>>,
+    pub pair_oracle_account: Account<'info, PriceUpdateV2>,
+    pub pair_twap_account: Option<Account<'info, TwapUpdate>>,
 
 
     #[account(mut,
@@ -97,8 +98,123 @@ if signatures_left > 0 {
     return Ok(signatures_left);
 }
 
+
 let current_time = ctx.accounts.t_yield.get_time()?;
 
+
+let token_price = OraclePrice::new_from_oracle(
+    &ctx.accounts.pair_oracle_account,
+    ctx.accounts.pair_twap_account.as_ref(),
+    &ctx.accounts.t_yield.oracle_param,
+    current_time as i64,
+    false,
+    params.feed_id,
+).map_err(|_| ErrorCode::InvalidOraclePrice)?;
+
+// Enhanced price validation configuration
+let validation_config = PriceValidationConfig::default();
+
+// Create a temporary trade for validation
+let temp_trade = Trade {
+    master_agent: ctx.accounts.master_agent.key(),
+    size: params.size,
+    entry_price: params.entry_price,
+    take_profit: params.take_profit,
+    stop_loss: params.stop_loss,
+    created_at: current_time,
+    updated_at: current_time,
+    pair: params.trade_pair,
+    feed_id: params.feed_id,
+    status: TradeStatus::Active as u8,
+    trade_type: params.trade_type as u8,
+    result: TradeResult::Pending as u8,
+    bump: 0,
+    _padding: [0; 7],
+};
+
+// Get current market price from oracle
+let current_market_price = token_price.scale_to_exponent(0)?.price;
+
+msg!("Current market price: {}", current_market_price);
+msg!("Requested entry price: {}", params.entry_price);
+
+// Comprehensive price validation using configuration
+temp_trade.validate_with_config(
+    current_market_price,
+    &token_price,
+    &validation_config,
+)?;
+
+// Validate that the trade can be executed
+if !temp_trade.can_execute_with_config(
+    current_market_price,
+    &token_price,
+    &validation_config,
+)? {
+    msg!("Trade cannot be executed at current market conditions");
+    return Err(ErrorCode::PriceOutOfRange);
+}
+
+// Calculate optimal entry price for comparison
+let optimal_entry_price = temp_trade.calculate_optimal_price_with_config(
+    &token_price,
+    &validation_config,
+)?;
+
+msg!("Optimal entry price: {}", optimal_entry_price);
+
+// Validate entry price against optimal price
+let price_diff = if params.entry_price >= optimal_entry_price {
+    params.entry_price.safe_sub(optimal_entry_price)?
+} else {
+    optimal_entry_price.safe_sub(params.entry_price)?
+};
+
+let price_diff_bps = price_diff
+    .safe_mul(crate::math::PERCENTAGE_PRECISION_U64)?
+    .safe_div(optimal_entry_price)?;
+
+if price_diff_bps > validation_config.max_slippage_bps {
+    msg!(
+        "Entry price deviation {} bps exceeds maximum {} bps",
+        price_diff_bps,
+        validation_config.max_slippage_bps
+    );
+    return Err(ErrorCode::MaxPriceSlippage);
+}
+
+// Validate side-specific price requirements
+match params.trade_type {
+    TradeType::Buy => {
+        if params.entry_price < current_market_price {
+            msg!("Buy order entry price {} below current market price {}", 
+                 params.entry_price, current_market_price);
+            return Err(ErrorCode::MaxPriceSlippage);
+        }
+    },
+    TradeType::Sell => {
+        if params.entry_price > current_market_price {
+            msg!("Sell order entry price {} above current market price {}", 
+                 params.entry_price, current_market_price);
+            return Err(ErrorCode::MaxPriceSlippage);
+        }
+    },
+}
+
+// Calculate and validate risk-reward ratio
+let risk_reward_ratio = temp_trade.calculate_risk_reward_ratio()?;
+msg!("Risk-reward ratio: {} bps", risk_reward_ratio);
+
+if risk_reward_ratio < validation_config.min_risk_reward_bps {
+    msg!("Risk-reward ratio {} bps below minimum {} bps", 
+         risk_reward_ratio, validation_config.min_risk_reward_bps);
+    return Err(ErrorCode::InsufficientRiskRewardRatio);
+}
+
+// Validate stop loss and take profit distances
+temp_trade.validate_risk_management_levels(validation_config.min_distance_bps)?;
+
+// All validations passed, initialize the trade
 let trade = ctx.accounts.trade.as_mut();
 
 let init_trade_params = TradeInitParams {
@@ -118,6 +234,11 @@ let init_trade_params = TradeInitParams {
 
 trade.init_trade(init_trade_params);
 
+let master_agent = ctx.accounts.master_agent.as_mut();
+master_agent.trade_count = master_agent.trade_count.safe_add(1)?;
+
+
+msg!("Trade opened successfully with comprehensive price validation");
 
 Ok(0)
 }

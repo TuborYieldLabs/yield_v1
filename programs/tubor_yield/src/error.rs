@@ -52,6 +52,28 @@ pub enum ErrorCode {
     InvalidStopLossSell,
     #[msg("This referrer is not a user")]
     ReferrerNotAUser,
+    InvalidOracleAccount,
+    StaleOraclePrice,
+    InvalidOraclePrice,
+    MissingTwap,
+    UnsupportedOracle,
+    // Enhanced price validation errors
+    #[msg("Current price exceeds maximum allowed slippage")]
+    MaxPriceSlippage,
+    #[msg("Price validation failed - current price is invalid")]
+    PriceValidationFailed,
+    #[msg("Stop loss price is too close to entry price")]
+    StopLossTooClose,
+    #[msg("Take profit price is too close to entry price")]
+    TakeProfitTooClose,
+    #[msg("Risk-reward ratio is too low")]
+    InsufficientRiskRewardRatio,
+    #[msg("Current price is outside acceptable trading range")]
+    PriceOutOfRange,
+    #[msg("Oracle price confidence interval is too wide")]
+    OracleConfidenceTooLow,
+    #[msg("Price deviation from expected range is too high")]
+    PriceDeviationTooHigh,
 }
 
 #[macro_export]

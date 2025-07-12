@@ -10,19 +10,19 @@ use crate::state::{OraclePrice, Size};
 pub struct Trade {
     // 8-byte aligned fields first
     pub master_agent: Pubkey, // 32 bytes (8-byte aligned)
+    pub feed_id: [u8; 32],    // 32 bytes
+    pub pair: [u8; 8],        // 8 bytes
     pub size: u64,            // 8 bytes
     pub entry_price: u64,     // 8 bytes
     pub take_profit: u64,     // 8 bytes
     pub stop_loss: u64,       // 8 bytes
-    pub created_at: i32,      // 4 bytes
-    pub updated_at: i32,      // 4 bytes
-    pub pair: [u8; 8],        // 8 bytes
-    pub feed_id: [u8; 32],    // 32 bytes
+    pub created_at: i64,      // 4 bytes
+    pub updated_at: i64,      // 4 bytes
     pub status: u8,           // 1 byte
     pub trade_type: u8,       // 1 byte
     pub result: u8,           // 1 byte
     pub bump: u8,             // 1 byte
-    pub _padding: [u8; 7],    // 7 bytes padding for future-proofing and alignment
+    pub _padding: [u8; 4],    // 4 bytes padding for future-proofing and alignment
 }
 
 #[derive(Clone, Copy, PartialEq, Debug, Eq, AnchorDeserialize, AnchorSerialize)]
@@ -55,7 +55,7 @@ pub struct TradeEvent {
     pub status: TradeStatus,
     pub trade_type: TradeType,
     pub result: TradeResult,
-    pub pnl: u64,
+    pub pnl: i64,
     pub created_at: i64,
 }
 
@@ -68,7 +68,7 @@ pub struct TradeInitParams {
     pub entry_price: u64,
     pub take_profit: u64,
     pub stop_loss: u64,
-    pub created_at: i32,
+    pub created_at: i64,
     pub pair: [u8; 8],
     pub feed_id: [u8; 32],
     pub status: TradeStatus,
@@ -393,7 +393,7 @@ impl Trade {
     }
 
     /// Gets the trade duration in seconds (if created_at is a timestamp)
-    pub fn get_duration(&self, current_time: i32) -> i32 {
+    pub fn get_duration(&self, current_time: i64) -> i64 {
         current_time - self.created_at
     }
 
@@ -425,7 +425,7 @@ impl Trade {
         self.trade_type = params.trade_type as u8;
         self.result = params.result as u8;
         self.bump = params.bump;
-        self._padding = [0; 7];
+        self._padding = [0; 4];
     }
 
     /// Updates mutable fields of the trade and sets updated_at
@@ -436,7 +436,7 @@ impl Trade {
         stop_loss: u64,
         status: TradeStatus,
         result: TradeResult,
-        updated_at: i32,
+        updated_at: i64,
     ) {
         self.size = size;
         self.take_profit = take_profit;
@@ -833,7 +833,7 @@ mod tests {
             trade_type: TradeType::Buy as u8,
             result: TradeResult::Pending as u8,
             bump: 1,
-            _padding: [0; 7],
+            _padding: [0; 4],
         }
     }
 
@@ -853,7 +853,7 @@ mod tests {
             trade_type: TradeType::Sell as u8,
             result: TradeResult::Pending as u8,
             bump: 1,
-            _padding: [0; 7],
+            _padding: [0; 4],
         }
     }
 
@@ -881,7 +881,7 @@ mod tests {
             trade_type: 0,
             result: 0,
             bump: 0,
-            _padding: [0; 7],
+            _padding: [0; 4],
         };
 
         assert_eq!(trade.master_agent, Pubkey::default());
@@ -896,7 +896,7 @@ mod tests {
         assert_eq!(trade.trade_type, 0);
         assert_eq!(trade.result, 0);
         assert_eq!(trade.bump, 0);
-        assert_eq!(trade._padding, [0; 7]);
+        assert_eq!(trade._padding, [0; 4]);
     }
 
     #[test]
@@ -1268,15 +1268,15 @@ mod tests {
             entry_price: u64::MAX,
             take_profit: u64::MAX,
             stop_loss: 0,
-            created_at: i32::MAX,
-            updated_at: i32::MAX,
+            created_at: i64::MAX,
+            updated_at: i64::MAX,
             pair: [255; 8],
             feed_id: [255; 32],
             status: TradeStatus::Active as u8,
             trade_type: TradeType::Buy as u8,
             result: TradeResult::Pending as u8,
             bump: 255,
-            _padding: [255; 7],
+            _padding: [255; 4],
         };
 
         // Should handle maximum values without panicking
@@ -1299,7 +1299,7 @@ mod tests {
             trade_type: 0,
             result: 0,
             bump: 0,
-            _padding: [0; 7],
+            _padding: [0; 4],
         };
 
         // Should handle minimum values without panicking

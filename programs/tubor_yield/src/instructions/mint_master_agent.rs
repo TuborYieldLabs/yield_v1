@@ -1,3 +1,21 @@
+//! Instruction: Mint Master Agent
+//!
+//! Mints a new master agent NFT, initializing protocol state and Metaplex metadata.
+//! Requires multisig approval. Handles all account creations and protocol state updates.
+//!
+//! Accounts:
+//! - Payer (signer)
+//! - Multisig PDA (protocol admin control)
+//! - Master agent account (PDA)
+//! - Mint account for the master agent NFT
+//! - Protocol state PDA (t_yield)
+//! - Transfer authority PDA
+//! - Metadata and master edition accounts (Metaplex)
+//! - Metaplex metadata program
+//! - Token account for the master agent NFT
+//! - System, Token2022, Associated Token programs
+//! - Sysvar instructions (for Metaplex CPI)
+
 use anchor_lang::prelude::*;
 use anchor_spl::{
     associated_token::AssociatedToken,
@@ -14,24 +32,41 @@ use crate::{
     },
 };
 
+/// Parameters for minting a new master agent NFT.
 #[derive(AnchorSerialize, AnchorDeserialize)]
 pub struct MintMasterAgentParams {
+    /// Name for the master agent NFT (Metaplex metadata)
     pub name: String,
+    /// Symbol for the master agent NFT (Metaplex metadata)
     pub symbol: String,
+    /// URI for the master agent NFT metadata (Metaplex)
     pub uri: String,
+    /// Seller fee basis points (Metaplex royalty)
     pub seller_fee_basis_points: u16,
-
+    /// Initial price for the master agent
     pub price: u64,
+    /// Initial yield (fixed-point, protocol-specific)
     pub w_yield: u64,
+    /// Maximum supply of agents under this master agent
     pub max_supply: u64,
 }
 
+/// Accounts required for minting a new master agent NFT.
+///
+/// This instruction:
+/// - Creates and initializes the master agent mint and metadata (Metaplex)
+/// - Initializes the master agent account (PDA)
+/// - Updates protocol state
+/// - Requires multisig approval
 #[derive(Accounts)]
 #[instruction(params: MintMasterAgentParams)]
 pub struct MintMasterAgent<'info> {
+    /// The account paying for all rent and fees. Must sign the transaction.
     #[account(mut)]
     pub payer: Signer<'info>,
 
+    /// Multisig PDA for protocol admin control.
+    /// Seeds: [b"multisig"]
     #[account(
         mut,
         seeds = [b"multisig"],
@@ -39,6 +74,8 @@ pub struct MintMasterAgent<'info> {
     )]
     pub multisig: AccountLoader<'info, Multisig>,
 
+    /// Master agent account PDA for the new master agent NFT.
+    /// Seeds: [b"master_agent", mint]
     #[account(
         init,
         payer = payer,
@@ -48,6 +85,7 @@ pub struct MintMasterAgent<'info> {
     )]
     pub master_agent: Box<Account<'info, MasterAgent>>,
 
+    /// Mint account for the new master agent NFT.
     #[account(
         init,
         payer = payer,
@@ -57,23 +95,26 @@ pub struct MintMasterAgent<'info> {
     )]
     pub mint: Box<Account<'info, Mint>>,
 
-    /// The t_yield config PDA (your protocol global state).
-    ///
-    /// Seeds: ["t_yield"]
+    /// Protocol global state PDA.
+    /// Seeds: [b"t_yield"]
     #[account(
         seeds = [b"t_yield"],
         bump = t_yield.t_yield_bump
     )]
     pub t_yield: Account<'info, TYield>,
 
-    /// CHECK: empty PDA, authority for token accounts
+    /// Transfer authority PDA (protocol authority for token/NFT operations).
+    /// Seeds: [b"transfer_authority"]
+    /// CHECK: Only used as authority.
     #[account(
-            seeds = [b"transfer_authority"],
-            bump = t_yield.transfer_authority_bump
-        )]
+        seeds = [b"transfer_authority"],
+        bump = t_yield.transfer_authority_bump
+    )]
     pub authority: AccountInfo<'info>,
 
-    /// CHECK: Metadata account initialized by Metaplex program
+    /// Metadata account for the master agent NFT (Metaplex)
+    /// PDA: ["metadata", METADATA_PROGRAM_ID, mint]
+    /// CHECK: Created and validated by Metaplex CPI
     #[account(
         mut,
         seeds = [
@@ -86,11 +127,14 @@ pub struct MintMasterAgent<'info> {
     )]
     pub metadata: AccountInfo<'info>,
 
-    /// CHECK: This is the Metaplex token metadata program
+    /// Metaplex token metadata program
+    /// CHECK: Used for Metaplex CPI only
     #[account(address = METADATA_PROGRAM_ID)]
     pub metadata_program: AccountInfo<'info>,
 
-    /// CHECK: Master edition account initialized by Metaplex program
+    /// Master edition account for the master agent NFT (Metaplex)
+    /// PDA: ["metadata", METADATA_PROGRAM_ID, mint, "edition"]
+    /// CHECK: Created and validated by Metaplex CPI
     #[account(
         mut,
         seeds = [
@@ -104,9 +148,9 @@ pub struct MintMasterAgent<'info> {
     )]
     pub master_edition: AccountInfo<'info>,
 
+    /// Token account for the master agent NFT (owned by protocol authority)
+    /// Associated token account for the mint and authority
     #[account(
-        // mut,
-        // constraint = token_account.mint == mint.key()
         init_if_needed,
         payer = payer,
         associated_token::mint = mint,
@@ -114,15 +158,34 @@ pub struct MintMasterAgent<'info> {
     )]
     pub token_account: Box<Account<'info, TokenAccount>>,
 
+    /// Solana system program.
     pub system_program: Program<'info, System>,
+    /// SPL Token2022 program.
     pub token_program: Program<'info, Token2022>,
+    /// SPL associated token program.
     pub associated_token_program: Program<'info, AssociatedToken>,
 
-    /// CHECK: This is the instructions sysvar, used by Metaplex CPI
+    /// Instructions sysvar (required for Metaplex CPI)
+    /// CHECK: Used for Metaplex CPI only
     #[account(address = anchor_lang::solana_program::sysvar::instructions::ID)]
     pub sysvar_instructions: AccountInfo<'info>,
 }
 
+/// Handler for minting a new master agent NFT.
+///
+/// - Requires multisig approval.
+/// - Initializes the master agent account and mint.
+/// - Creates Metaplex metadata and master edition accounts.
+/// - Updates protocol state.
+///
+/// # Arguments
+/// * `ctx` - Context with the required accounts.
+/// * `params` - Minting parameters (name, symbol, uri, etc).
+///
+/// # Returns
+/// * `Ok(signatures_left)` - If more multisig signatures are required.
+/// * `Ok(0)` - If minting is complete.
+/// * `Err` - On error (invalid bumps, instruction hash, etc).
 pub fn mint_master_agent<'info>(
     ctx: Context<'_, '_, '_, 'info, MintMasterAgent<'info>>,
     params: MintMasterAgentParams,

@@ -1,15 +1,17 @@
 use crate::program::Tuboryield;
 
 use mpl_token_metadata::{
-    instructions::{CreateV1CpiBuilder, MintV1CpiBuilder},
-    types::{Collection, Creator, PrintSupply, TokenStandard as MetaplexTokenStandard},
+    instructions::{CreateV1CpiBuilder, MintV1CpiBuilder, TransferCpiBuilder},
+    types::{
+        Collection, Creator, PrintSupply, TokenStandard as MetaplexTokenStandard, TransferArgs,
+    },
 };
 
 use {
     crate::{
         error::{ErrorCode, TYieldResult},
         instructions::{MintAgent, MintAgentParams, MintMasterAgent, MintMasterAgentParams},
-        math::{Cast, SafeMath},
+        math::SafeMath,
         state::{OracleParams, Size},
         try_from,
     },
@@ -29,31 +31,59 @@ pub struct Permissions {
 pub struct TYield {
     // 8-byte aligned fields (largest first)
     pub oracle_param: OracleParams, // 109 bytes
-    pub y_mint: Pubkey,             // 32 bytes
-    pub buy_tax: u64,               // 8 bytes
-    pub sell_tax: u64,              // 8 bytes
+
+    pub y_mint: Pubkey,
+    /// PRECISION PERCENTAGE_PRECISION
+    pub buy_tax: u64,
+    /// PRECISION PERCENTAGE_PRECISION
+    pub sell_tax: u64,
+    /// PRECISION PERCENTAGE_PRECISION
+    pub max_tax_percentage: u64,
+    /// PRECISION PERCENTAGE_PRECISION
     pub ref_earn_percentage: u64,
+    /// PRECISION PERCENTAGE_PRECISION
+    pub max_agent_price_new: u64,
+
+    /// PRECISION QUOTE_PRECISION
+    pub protocol_current_holding: u64,
+
+    /// PRECISION QUOTE_PRECISION
+    pub protcol_total_fees: u64,
+
+    /// PRECISION QUOTE_PRECISION
+    pub protocol_total_earnings: u64,
+
+    /// PRECISION QUOTE_PRECISION
+    pub protocol_total_balance_usd: u64,
 
     // 4-byte aligned fields
-    pub inception_time: i32, // 4 bytes
+    pub inception_time: i64, // 4 bytes
 
     // 1-byte aligned fields (smallest last)
     pub permissions: Permissions,    // 4 bytes
     pub transfer_authority_bump: u8, // 1 byte
     pub t_yield_bump: u8,            // 1 byte
-
+    pub paused: bool,                // 1 byte - protocol paused flag
     // Padding for future-proofing and alignment
-    pub _padding: [u8; 6], // 6 bytes to align to 8-byte boundary
+    pub _padding: [u8; 5], // 5 bytes to align to 8-byte boundary (was 6)
 }
 
+#[event]
+pub struct InitProtocolEvent {
+    pub inception_time: i64,
+    pub paused: bool,
+    pub permissions: Permissions,
+}
+#[event]
+pub struct UpdateProtocolEvent {}
+
 impl TYield {
-    pub fn get_time(&self) -> TYieldResult<i32> {
+    pub fn get_time(&self) -> TYieldResult<i64> {
         let clock = anchor_lang::solana_program::sysvar::clock::Clock::get()
             .map_err(|_| ErrorCode::MathError)?;
         let time = clock.unix_timestamp;
-        let casted_t = time.cast()?;
-        if casted_t > 0 {
-            Ok(casted_t)
+        if time > 0 {
+            Ok(time)
         } else {
             Err(ErrorCode::MathError)
         }
@@ -328,27 +358,55 @@ impl TYield {
             .invoke_signed(authority_seeds)?;
         Ok(())
     }
+
+    pub fn transfer_agent(&self, params: TransferAgentParams) -> Result<()> {
+        let authority_seeds: &[&[&[u8]]] =
+            &[&[b"transfer_authority", &[self.transfer_authority_bump]]];
+
+        TransferCpiBuilder::new(&params.metadata_program)
+            .token(&params.sender_nft_token_account)
+            .token_owner(&params.authority)
+            .destination_token(&params.receiver_token_account)
+            .destination_owner(&params.receiver)
+            .mint(&params.mint)
+            .metadata(&params.metadata)
+            .authority(&params.authority)
+            .payer(&params.payer)
+            .token_record(None)
+            .destination_token_record(None)
+            .authorization_rules_program(None)
+            .authorization_rules(None)
+            .system_program(&params.system_program)
+            .spl_ata_program(&params.associated_token_program)
+            .spl_token_program(&params.token_program)
+            .sysvar_instructions(&params.sysvar_instructions)
+            .transfer_args(TransferArgs::V1 {
+                amount: 1,
+                authorization_data: None,
+            })
+            .invoke_signed(authority_seeds)?;
+
+        Ok(())
+    }
+}
+
+pub struct TransferAgentParams<'info> {
+    pub payer: AccountInfo<'info>,
+    pub sender_nft_token_account: AccountInfo<'info>,
+    pub authority: AccountInfo<'info>,
+    pub receiver_token_account: AccountInfo<'info>,
+    pub receiver: AccountInfo<'info>,
+    pub mint: AccountInfo<'info>,
+    pub metadata: AccountInfo<'info>,
+    pub metadata_program: AccountInfo<'info>,
+    pub system_program: AccountInfo<'info>,
+    pub associated_token_program: AccountInfo<'info>,
+    pub token_program: AccountInfo<'info>,
+    pub sysvar_instructions: AccountInfo<'info>,
 }
 
 impl Size for TYield {
-    // Calculation:
-    // OracleParams: 109 bytes
-    // y_mint: 32
-    // buy_tax: 8
-    // sell_tax: 8
-    // ref_earn_percentage: 8
-    // inception_time: 4
-    // permissions: 4
-    // transfer_authority_bump: 1
-    // t_yield_bump: 1
-    // _padding: 6
-    // Total: 109+32+8+8+8+4+4+1+1+6 = 181
-    // But OracleParams has extra padding (see its definition):
-    // OracleParams: 32+32+8+4+1+3+29 = 109 (already includes padding)
-    // So sum: 109+32+8+8+8+4+4+1+1+6 = 181
-    // But std::mem::size_of::<TYield>() is likely 184 (due to alignment)
-    // So 8 + 184 = 192
-    const SIZE: usize = 192; // 8 (discriminator) + 184 (struct fields, including alignment) = 192 bytes
+    const SIZE: usize = 216;
 }
 
 #[cfg(test)]
@@ -372,6 +430,7 @@ mod tests {
         assert_eq!(t_yield.inception_time, 0);
         assert_eq!(t_yield.transfer_authority_bump, 0);
         assert_eq!(t_yield.t_yield_bump, 0);
-        assert_eq!(t_yield._padding, [0; 6]);
+        assert_eq!(t_yield.paused, false);
+        assert_eq!(t_yield._padding, [0; 5]);
     }
 }

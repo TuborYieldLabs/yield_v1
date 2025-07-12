@@ -25,14 +25,12 @@ pub struct OraclePrice {
 
 #[derive(Copy, Clone, PartialEq, AnchorSerialize, AnchorDeserialize, Default, Debug)]
 pub struct OracleParams {
-    // Oracle configuration - arranged by size for optimal alignment
-    pub oracle_account: Pubkey,    // 32 bytes
-    pub feed_id: [u8; 32],         // 32 bytes
-    pub max_price_error: u64,      // 8 bytes
-    pub max_price_age_sec: u32,    // 4 bytes
-    pub oracle_type: OracleType,   // 1 byte
-    pub _padding: [u8; 3],         // 3 bytes padding to align to 8-byte boundary
-    pub _future_padding: [u8; 29], // 29 bytes for future-proofing
+    pub oracle_account: Pubkey,  // 32 bytes
+    pub feed_id: [u8; 32],       // 32 bytes
+    pub max_price_error: u64,    // 8 bytes
+    pub max_price_age_sec: u32,  // 4 bytes
+    pub oracle_type: OracleType, // 1 byte
+    pub _padding: [u8; 3],       // 3 bytes to make total size 80 bytes (8 * 10)
 }
 
 #[account]
@@ -69,14 +67,7 @@ impl Size for CustomOracle {
 }
 
 impl Size for OracleParams {
-    const SIZE: usize = 32 + // oracle_account
-                       32 + // feed_id
-                       8 + // max_price_error
-                       4 + // max_price_age_sec
-                       1 + // oracle_type
-                       3 + // _padding to align to 8-byte boundary
-                       29 + // _future_padding
-                       3; // additional padding for alignment
+    const SIZE: usize = 80;
 }
 
 impl PartialOrd for OraclePrice {
@@ -479,6 +470,5 @@ mod tests {
         assert_eq!(params.max_price_age_sec, 0);
         assert_eq!(params.oracle_type, OracleType::default());
         assert_eq!(params._padding, [0; 3]);
-        assert_eq!(params._future_padding, [0; 29]);
     }
 }

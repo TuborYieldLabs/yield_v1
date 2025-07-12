@@ -1,3 +1,21 @@
+//! Instruction: Mint Agent
+//!
+//! Mints a new agent NFT under a master agent, initializing all relevant protocol state and Metaplex metadata.
+//! Requires multisig approval. Handles all account creations and protocol state updates.
+//!
+//! Accounts:
+//! - Payer (signer)
+//! - Multisig PDA (protocol admin control)
+//! - Protocol state PDA (t_yield)
+//! - Transfer authority PDA
+//! - Mint account for the new agent NFT
+//! - Metadata and master edition accounts (Metaplex)
+//! - Master agent mint and account
+//! - Agent account (PDA)
+//! - Token account for the agent NFT
+//! - System, Token2022, Associated Token programs
+//! - Sysvar instructions (for Metaplex CPI)
+
 use anchor_lang::prelude::*;
 use anchor_spl::{
     associated_token::AssociatedToken,
@@ -9,23 +27,38 @@ use mpl_token_metadata::ID as METADATA_PROGRAM_ID;
 
 use crate::{
     error::{ErrorCode, TYieldResult},
-    state::{AdminInstruction, Agent, MasterAgent, Multisig, Size, TYield},
+    state::{AdminInstruction, Agent, MasterAgent, MintAgentEvent, Multisig, Size, TYield},
 };
 
+/// Parameters for minting a new agent NFT.
 #[derive(AnchorSerialize, AnchorDeserialize)]
 pub struct MintAgentParams {
+    /// Name for the agent NFT (Metaplex metadata)
     pub name: String,
+    /// Symbol for the agent NFT (Metaplex metadata)
     pub symbol: String,
+    /// URI for the agent NFT metadata (Metaplex)
     pub uri: String,
+    /// Seller fee basis points (Metaplex royalty)
     pub seller_fee_basis_points: u16,
 }
 
+/// Accounts required for minting a new agent NFT under a master agent.
+///
+/// This instruction:
+/// - Creates and initializes the agent mint and metadata (Metaplex)
+/// - Initializes the agent account (PDA)
+/// - Updates protocol and master agent state
+/// - Requires multisig approval
 #[derive(Accounts)]
 #[instruction(params: MintAgentParams)]
 pub struct MintAgent<'info> {
+    /// The account paying for all rent and fees. Must sign the transaction.
     #[account(mut)]
     pub payer: Signer<'info>,
 
+    /// Multisig PDA for protocol admin control.
+    /// Seeds: [b"multisig"]
     #[account(
         mut,
         seeds = [b"multisig"],
@@ -33,6 +66,24 @@ pub struct MintAgent<'info> {
     )]
     pub multisig: AccountLoader<'info, Multisig>,
 
+    /// Protocol global state PDA.
+    /// Seeds: [b"t_yield"]
+    #[account(
+        seeds = [b"t_yield"],
+        bump = t_yield.t_yield_bump
+    )]
+    pub t_yield: Box<Account<'info, TYield>>,
+
+    /// Transfer authority PDA (protocol authority for token/NFT operations).
+    /// Seeds: [b"transfer_authority"]
+    /// CHECK: Only used as authority.
+    #[account(
+        seeds = [b"transfer_authority"],
+        bump = t_yield.transfer_authority_bump
+    )]
+    pub authority: AccountInfo<'info>,
+
+    /// Mint account for the new agent NFT.
     #[account(
         init,
         payer = payer,
@@ -42,23 +93,8 @@ pub struct MintAgent<'info> {
     )]
     pub mint: Box<Account<'info, Mint>>,
 
-    /// The t_yield config PDA (your protocol global state).
-    ///
-    /// Seeds: ["t_yield"]
-    #[account(
-        seeds = [b"t_yield"],
-        bump = t_yield.t_yield_bump
-    )]
-    pub t_yield: Box<Account<'info, TYield>>,
-
-    /// CHECK: empty PDA, authority for token accounts
-    #[account(
-            seeds = [b"transfer_authority"],
-            bump = t_yield.transfer_authority_bump
-        )]
-    pub authority: AccountInfo<'info>,
-
-    /// CHECK: Metadata account initialized by Metaplex program
+    /// CHECK: Metadata account for the agent NFT (Metaplex)
+    /// PDA: ["metadata", METADATA_PROGRAM_ID, mint]
     #[account(
         mut,
         seeds = [
@@ -71,20 +107,8 @@ pub struct MintAgent<'info> {
     )]
     pub metadata: AccountInfo<'info>,
 
-    #[account(mut)]
-    pub master_agent_mint: Box<Account<'info, Mint>>,
-    #[account(
-        mut,
-        seeds = [b"master_agent".as_ref(), master_agent_mint.key().as_ref()],
-        bump = master_agent.bump,
-    )]
-    pub master_agent: Box<Account<'info, MasterAgent>>,
-
-    /// CHECK: This is the Metaplex token metadata program
-    #[account(address = METADATA_PROGRAM_ID)]
-    pub metadata_program: AccountInfo<'info>,
-
-    /// CHECK: Master edition account initialized by Metaplex program
+    /// CHECK: Master edition account for the agent NFT (Metaplex)
+    /// PDA: ["metadata", METADATA_PROGRAM_ID, mint, "edition"]
     #[account(
         mut,
         seeds = [
@@ -98,6 +122,25 @@ pub struct MintAgent<'info> {
     )]
     pub master_edition: AccountInfo<'info>,
 
+    /// CHECK: Metaplex token metadata program
+    #[account(address = METADATA_PROGRAM_ID)]
+    pub metadata_program: AccountInfo<'info>,
+
+    /// Mint account for the master agent NFT (parent/master of the agent)
+    #[account(mut)]
+    pub master_agent_mint: Box<Account<'info, Mint>>,
+
+    /// Master agent account PDA (parent/master of the agent)
+    /// Seeds: [b"master_agent", master_agent_mint]
+    #[account(
+        mut,
+        seeds = [b"master_agent".as_ref(), master_agent_mint.key().as_ref()],
+        bump = master_agent.bump,
+    )]
+    pub master_agent: Box<Account<'info, MasterAgent>>,
+
+    /// Agent account PDA for the new agent NFT.
+    /// Seeds: [b"agent", mint]
     #[account(
         init_if_needed,
         payer = payer,
@@ -107,25 +150,46 @@ pub struct MintAgent<'info> {
     )]
     pub agent: Box<Account<'info, Agent>>,
 
+    /// Token account for the agent NFT (owned by protocol authority)
+    /// Must have mint == agent mint.
     #[account(
-        // mut,
-        // constraint = token_account.mint == mint.key()
-        init_if_needed,
-        payer = payer,
-        associated_token::mint = mint,
-        associated_token::authority = authority,
+        mut,
+        constraint = token_account.mint == mint.key()
     )]
     pub token_account: Box<Account<'info, TokenAccount>>,
 
+    /// Solana system program.
     pub system_program: Program<'info, System>,
+    /// SPL Token2022 program.
     pub token_program: Program<'info, Token2022>,
+    /// SPL associated token program.
     pub associated_token_program: Program<'info, AssociatedToken>,
 
-    /// CHECK: This is the instructions sysvar, used by Metaplex CPI
+    /// CHECK: Instructions sysvar (required for Metaplex CPI)
     #[account(address = anchor_lang::solana_program::sysvar::instructions::ID)]
     pub sysvar_instructions: AccountInfo<'info>,
+
+    // --- Misc ---
+    /// CHECK: Event authority for CPI event logs (used for event emission; not written to).
+    #[account(
+        seeds = [b"__event_authority"],
+        bump,
+    )]
+    pub event_authority: AccountInfo<'info>,
 }
 
+/// Handler for minting a new agent NFT under a master agent.
+///
+/// - Requires multisig approval.
+/// - Initializes agent mint, metadata, and agent account.
+/// - Updates protocol and master agent state.
+///
+/// # Arguments
+/// * `ctx` - Context with the required accounts.
+/// * `params` - Parameters for the agent NFT (name, symbol, uri, royalty).
+///
+/// # Returns
+/// * `Ok(0)` if successful, or the number of signatures left for multisig approval.
 pub fn mint_agent<'info>(
     ctx: Context<'_, '_, '_, 'info, MintAgent<'info>>,
     params: MintAgentParams,
@@ -153,24 +217,38 @@ pub fn mint_agent<'info>(
     }
 
     let current_time = ctx.accounts.t_yield.get_time()?;
-    let master_agent = ctx.accounts.master_agent.as_ref();
-    let agent = ctx.accounts.agent.as_mut();
 
-    agent.initialize(
-        master_agent.key(),
-        ctx.accounts.mint.key(),
-        ctx.accounts.authority.key(),
-        0,
-        current_time,
-        ctx.bumps.agent,
-    )?;
+    {
+        let master_agent = ctx.accounts.master_agent.as_mut();
+        let agent = ctx.accounts.agent.as_mut();
 
-    agent.validate()?;
+        agent.initialize(
+            master_agent.key(),
+            ctx.accounts.mint.key(),
+            ctx.accounts.authority.key(),
+            0,
+            current_time,
+            ctx.bumps.agent,
+        )?;
+
+        agent.validate()?;
+
+        master_agent.add_agent(current_time)?;
+    }
 
     ctx.accounts
         .t_yield
         .mint_agent(&ctx, params)
         .map_err(|_| ErrorCode::InvalidInstructionHash)?;
+
+    let agent = ctx.accounts.agent.as_ref();
+
+    emit_cpi!(MintAgentEvent {
+        agent: agent.key(),
+        owner: agent.owner,
+        master_agent: agent.master_agent,
+        timestamp: current_time
+    });
 
     Ok(0)
 }

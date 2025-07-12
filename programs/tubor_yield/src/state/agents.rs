@@ -14,8 +14,8 @@ pub struct Agent {
     pub booster: u64,         // 8 bytes
 
     // 4-byte aligned fields
-    pub created_at: i32,   // 4 bytes
-    pub last_updated: i32, // 4 bytes
+    pub created_at: i64,   // 4 bytes
+    pub last_updated: i64, // 4 bytes
 
     // 1-byte aligned fields (smallest last)
     pub is_listed: bool, // 1 byte
@@ -23,6 +23,30 @@ pub struct Agent {
 
     // Future-proofing padding
     pub _padding: [u8; 6], // 6 bytes for future additions
+}
+
+#[event]
+pub struct BuyAgentEvent {
+    pub agent: Pubkey,
+    pub owner: Pubkey,
+    pub master_agent: Pubkey,
+    pub timestamp: i64,
+}
+
+#[event]
+pub struct SellAgentEvent {
+    pub agent: Pubkey,
+    pub owner: Pubkey,
+    pub master_agent: Pubkey,
+    pub timestamp: i64,
+}
+
+#[event]
+pub struct MintAgentEvent {
+    pub agent: Pubkey,
+    pub owner: Pubkey,
+    pub master_agent: Pubkey,
+    pub timestamp: i64,
 }
 
 impl Agent {
@@ -33,7 +57,7 @@ impl Agent {
         mint: Pubkey,
         owner: Pubkey,
         booster: u64,
-        current_time: i32,
+        current_time: i64,
         bump: u8,
     ) -> TYieldResult<()> {
         self.master_agent = master_agent;
@@ -48,7 +72,7 @@ impl Agent {
     }
 
     /// Update the booster value
-    pub fn update_booster(&mut self, new_booster: u64, current_time: i32) -> TYieldResult<()> {
+    pub fn update_booster(&mut self, new_booster: u64, current_time: i64) -> TYieldResult<()> {
         if new_booster == 0 {
             return Err(ErrorCode::InvalidAccount);
         }
@@ -58,7 +82,7 @@ impl Agent {
     }
 
     /// List the agent for trading
-    pub fn list(&mut self, current_time: i32) -> TYieldResult<()> {
+    pub fn list(&mut self, current_time: i64) -> TYieldResult<()> {
         if self.is_listed {
             return Err(ErrorCode::InvalidAccount);
         }
@@ -68,7 +92,7 @@ impl Agent {
     }
 
     /// Unlist the agent from trading
-    pub fn unlist(&mut self, current_time: i32) -> TYieldResult<()> {
+    pub fn unlist(&mut self, current_time: i64) -> TYieldResult<()> {
         if !self.is_listed {
             return Err(ErrorCode::InvalidAccount);
         }
@@ -78,7 +102,7 @@ impl Agent {
     }
 
     /// Toggle the listing status
-    pub fn toggle_listing(&mut self, current_time: i32) -> TYieldResult<()> {
+    pub fn toggle_listing(&mut self, current_time: i64) -> TYieldResult<()> {
         if self.is_listed {
             self.unlist(current_time)
         } else {
@@ -87,7 +111,7 @@ impl Agent {
     }
 
     /// Transfer ownership of the agent
-    pub fn transfer_ownership(&mut self, new_owner: Pubkey, current_time: i32) -> TYieldResult<()> {
+    pub fn transfer_ownership(&mut self, new_owner: Pubkey, current_time: i64) -> TYieldResult<()> {
         if new_owner == Pubkey::default() {
             return Err(ErrorCode::InvalidAccount);
         }
@@ -122,13 +146,13 @@ impl Agent {
     }
 
     /// Get days since the agent was created
-    pub fn get_days_since_created(&self, current_time: i32) -> i32 {
+    pub fn get_days_since_created(&self, current_time: i64) -> i64 {
         let seconds_diff = current_time - self.created_at;
         seconds_diff / 86400 // 86400 seconds in a day
     }
 
     /// Get days since the agent was last updated
-    pub fn get_days_since_updated(&self, current_time: i32) -> i32 {
+    pub fn get_days_since_updated(&self, current_time: i64) -> i64 {
         let seconds_diff = current_time - self.last_updated;
         seconds_diff / 86400 // 86400 seconds in a day
     }
@@ -139,7 +163,7 @@ impl Agent {
     }
 
     /// Check if the agent is idle (no updates for a while)
-    pub fn is_idle(&self, current_time: i32, idle_threshold_days: i32) -> bool {
+    pub fn is_idle(&self, current_time: i64, idle_threshold_days: i64) -> bool {
         let days_since_update = self.get_days_since_updated(current_time);
         days_since_update > idle_threshold_days
     }
@@ -193,7 +217,7 @@ impl Agent {
     }
 
     /// Get summary statistics
-    pub fn get_summary(&self) -> (Pubkey, Pubkey, Pubkey, u64, bool, i32) {
+    pub fn get_summary(&self) -> (Pubkey, Pubkey, Pubkey, u64, bool, i64) {
         (
             self.master_agent,
             self.mint,
@@ -205,7 +229,7 @@ impl Agent {
     }
 
     /// Check if the agent needs attention (old, inactive, etc.)
-    pub fn needs_attention(&self, current_time: i32) -> bool {
+    pub fn needs_attention(&self, current_time: i64) -> bool {
         let days_since_update = self.get_days_since_updated(current_time);
         let days_since_created = self.get_days_since_created(current_time);
 
@@ -223,22 +247,22 @@ impl Agent {
     }
 
     /// Get the agent's age in days
-    pub fn get_age_days(&self, current_time: i32) -> i32 {
+    pub fn get_age_days(&self, current_time: i64) -> i64 {
         self.get_days_since_created(current_time)
     }
 
     /// Check if the agent is newly created (less than 7 days old)
-    pub fn is_new(&self, current_time: i32) -> bool {
+    pub fn is_new(&self, current_time: i64) -> bool {
         self.get_age_days(current_time) < 7
     }
 
     /// Check if the agent is mature (more than 30 days old)
-    pub fn is_mature(&self, current_time: i32) -> bool {
+    pub fn is_mature(&self, current_time: i64) -> bool {
         self.get_age_days(current_time) >= 30
     }
 
     /// Get the agent's performance score based on age and activity
-    pub fn get_performance_score(&self, current_time: i32) -> u64 {
+    pub fn get_performance_score(&self, current_time: i64) -> u64 {
         let age_days = self.get_age_days(current_time);
         let days_since_update = self.get_days_since_updated(current_time);
 
@@ -265,7 +289,7 @@ impl Agent {
 }
 
 impl Size for Agent {
-    const SIZE: usize = 128; // 8 (discriminator) + 120 (struct, including padding) = 128 bytes
+    const SIZE: usize = 136; // 8 (discriminator) + 128 (struct, including padding) = 136 bytes
 }
 
 #[cfg(test)]

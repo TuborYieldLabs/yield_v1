@@ -3,37 +3,44 @@ use pyth_solana_receiver_sdk::price_update::{PriceUpdateV2, TwapUpdate};
 
 use crate::{error::{ErrorCode, TYieldResult}, math::SafeMath, state::{ trade::{PriceValidationConfig, Trade, TradeInitParams, TradeResult, TradeStatus, TradeType}, AdminInstruction, MasterAgent, Multisig, OraclePrice, Size, TYield}};
 
+/// Parameters for opening a new trade.
 #[derive(AnchorSerialize, AnchorDeserialize)]
 pub struct OpenTradeParams {
+    /// The requested entry price for the trade (scaled integer, e.g. 1e6 = 1.0 if using 6 decimals)
     pub entry_price: u64,
-
+    /// The take profit price for the trade (scaled integer)
     pub take_profit: u64,
-
+    /// The size of the trade (scaled integer, e.g. in base units)
     pub size: u64,
-
+    /// The stop loss price for the trade (scaled integer)
     pub stop_loss: u64,
-
+    /// The type of trade (Buy or Sell)
     pub trade_type: TradeType,
-
+    /// The feed ID for the oracle price feed (32 bytes)
     pub feed_id: [u8; 32],
+    /// The trading pair identifier (8 bytes)
     pub trade_pair: [u8; 8],
 }
 
+/// Accounts required for opening a new trade.
+///
+/// # Account Ordering
+/// - `authority`: The user opening the trade and paying for account creation.
+/// - `t_yield`: The protocol's global state/config PDA.
+/// - `multisig`: The protocol's multisig PDA for admin/multisig actions.
+/// - `pair_oracle_account`: The oracle account providing the current price.
+/// - `pair_twap_account`: (Optional) The oracle account providing the TWAP price.
+/// - `master_agent`: The user's master agent account (agent NFT state).
+/// - `master_agent_mint`: The mint account for the agent NFT (checked, not written).
+/// - `trade`: The trade account to be created (PDA, initialized here).
+/// - `system_program`: The system program for account creation.
 #[derive(Accounts)]
 pub struct OpenTrade<'info> {
-
+    /// The user opening the trade and paying for account creation.
     #[account(mut)]
     pub authority: Signer<'info>,
 
-    #[account(
-        mut,
-        seeds = [b"multisig"],
-        bump = multisig.load()?.bump
-    )]
-    pub multisig: AccountLoader<'info, Multisig>,
-
-
-    /// The t_yield config PDA (your protocol global state).
+    /// The protocol's global state/config PDA.
     ///
     /// Seeds: ["t_yield"]
     #[account(
@@ -42,10 +49,20 @@ pub struct OpenTrade<'info> {
     )]
     pub t_yield: Account<'info, TYield>,
 
+    /// The protocol's multisig PDA for admin/multisig actions.
+    #[account(
+        mut,
+        seeds = [b"multisig"],
+        bump = multisig.load()?.bump
+    )]
+    pub multisig: AccountLoader<'info, Multisig>,
+
+    /// The oracle account providing the current price.
     pub pair_oracle_account: Account<'info, PriceUpdateV2>,
+    /// (Optional) The oracle account providing the TWAP price.
     pub pair_twap_account: Option<Account<'info, TwapUpdate>>,
 
-
+    /// The user's master agent account (agent NFT state).
     #[account(mut,
         seeds = [b"master_agent".as_ref(), master_agent_mint.key().as_ref()],
         bump = master_agent.bump,
@@ -53,12 +70,13 @@ pub struct OpenTrade<'info> {
     pub master_agent: Box<Account<'info, MasterAgent>>,
 
     /// CHECK: Mint account for the NFT representing the agent
+    /// Must match the mint in the master_agent account.
     #[account(
        constraint = master_agent_mint.key() == master_agent.mint
     )]
     pub master_agent_mint: AccountInfo<'info>,
 
-
+    /// The trade account to be created (PDA, initialized here).
     #[account(
         init,
         payer = authority, 
@@ -68,6 +86,7 @@ pub struct OpenTrade<'info> {
     )]
     pub trade: Box<Account<'info, Trade>>,
 
+    /// The system program for account creation.
     pub system_program: Program<'info, System>,
 }
 
@@ -106,7 +125,7 @@ let token_price = OraclePrice::new_from_oracle(
     &ctx.accounts.pair_oracle_account,
     ctx.accounts.pair_twap_account.as_ref(),
     &ctx.accounts.t_yield.oracle_param,
-    current_time as i64,
+    current_time ,
     false,
     params.feed_id,
 ).map_err(|_| ErrorCode::InvalidOraclePrice)?;
@@ -129,7 +148,7 @@ let temp_trade = Trade {
     trade_type: params.trade_type as u8,
     result: TradeResult::Pending as u8,
     bump: 0,
-    _padding: [0; 7],
+    _padding: [0; 4],
 };
 
 // Get current market price from oracle

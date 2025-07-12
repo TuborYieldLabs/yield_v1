@@ -7,48 +7,31 @@ use crate::state::Size;
 #[account]
 #[derive(Eq, PartialEq, Debug)]
 pub struct User {
-    /// The owner/authority of the account
+    // 32 bytes each, naturally aligned
     pub authority: Pubkey,
-
-    /// An addresses that can control the account on the authority's behalf. Has limited power, cant withdraw
     pub delegate: Pubkey,
-
-    /// Encoded display name e.g. "t_yield"
-    pub name: [u8; 32],
-
-    /// The total values of agents the user has purchased
-    /// precision: QUOTE_PRECISION
-    pub total_agents_purchased: u64,
-
-    /// precision: QUOTE_PRECISION
-    pub total_unclaimed_yield: u64,
-
-    /// The total values of agents the user has purchased
-    pub total_agents_owned: u32,
-
-    /// Whether the user is active or banned
-    pub status: u8,
-
-    /// User is idle if they haven't interacted with the protocol in 1 week
-    /// Off-chain sleeper bots can ignore users that are idle
-    pub idle: bool,
-
-    /// Padding to align to 8-byte boundary
-    pub _padding1: [u8; 2],
-
-    /// Referrer's public key (zero if no referrer) : The user who referred this user
     pub referrer: Pubkey,
 
+    // 32 bytes, 8-byte aligned
     pub history: History,
 
-    pub updated_at: i32,
+    // 8 bytes each, 8-byte aligned
+    pub total_agents_purchased: u64,
+    pub total_unclaimed_yield: u64,
 
-    pub created_at: i32,
+    // 4 bytes each, 4-byte aligned
+    pub updated_at: i64,
+    pub created_at: i64,
+    pub total_agents_owned: u32,
 
+    // 15 bytes + 1 byte fields
+    pub name: [u8; 15],
+    pub status: u8,
+    pub idle: bool,
     pub bump: u8,
 
-    /// Padding to align to 8-byte boundary
-    pub _padding2: [u8; 3],
+    // 7 bytes padding to align to 8 bytes
+    pub _padding: [u8; 7],
 }
 
 impl User {
@@ -168,12 +151,12 @@ impl User {
     }
 
     // Time-based methods
-    pub fn update_last_activity(&mut self, current_time: i32) {
+    pub fn update_last_activity(&mut self, current_time: i64) {
         self.updated_at = current_time;
         self.idle = false;
     }
 
-    pub fn check_idle_status(&mut self, current_time: i32, idle_threshold: i32) {
+    pub fn check_idle_status(&mut self, current_time: i64, idle_threshold: i64) {
         let time_since_last_activity = current_time - self.updated_at;
         self.idle = time_since_last_activity > idle_threshold;
     }
@@ -182,20 +165,20 @@ impl User {
         self.idle
     }
 
-    pub fn get_days_since_created(&self, current_time: i32) -> i32 {
+    pub fn get_days_since_created(&self, current_time: i64) -> i64 {
         (current_time - self.created_at) / 86400 // 86400 seconds in a day
     }
 
-    pub fn get_days_since_updated(&self, current_time: i32) -> i32 {
+    pub fn get_days_since_updated(&self, current_time: i64) -> i64 {
         (current_time - self.updated_at) / 86400
     }
 
     // Name management methods
-    pub fn set_name(&mut self, name: [u8; 32]) {
+    pub fn set_name(&mut self, name: [u8; 15]) {
         self.name = name;
     }
 
-    pub fn get_name(&self) -> [u8; 32] {
+    pub fn get_name(&self) -> [u8; 15] {
         self.name
     }
 
@@ -324,7 +307,7 @@ impl Default for User {
         Self {
             authority: Pubkey::default(),
             delegate: Pubkey::default(),
-            name: [0; 32],
+            name: [0; 15],
             total_agents_owned: 0,
             total_agents_purchased: 0,
             total_unclaimed_yield: 0,
@@ -335,8 +318,7 @@ impl Default for User {
             updated_at: 0,
             created_at: 0,
             bump: 0,
-            _padding1: [0; 2],
-            _padding2: [0; 3],
+            _padding: [0; 7],
         }
     }
 }
@@ -502,69 +484,101 @@ impl History {
 #[account]
 #[derive(Eq, PartialEq, Debug, Default)]
 pub struct ReferralRegistry {
-    /// The Pubkey of the user who owns this registry
+    // 32 bytes, 8-byte aligned
     pub referrer: Pubkey,
-    pub total_referred_users: u32,
 
-    /// PRECISION : QUOTE PRECISION
+    // 8 bytes each, 8-byte aligned
     pub total_referral_earnings: u64,
-    /// PRECISION : QUOTE PRECISION
     pub total_referral_earnings_uc: u64, // Unclaimed
 
-    pub created_at: i32,
-    pub updated_at: i32,
+    // 4 bytes each, 4-byte aligned
+    pub total_referred_users: u32,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub last_earning_claim: i64,
 
+    // 1 byte
     pub bump: u8,
-    pub _padding: [u8; 3],
-    // Note: Individual referrals are tracked via separate ReferralLink accounts.
+
+    // 7 bytes padding to align to 8 bytes
+    pub _padding: [u8; 7],
 }
 
 impl ReferralRegistry {
-    // Note: To check if a user is referred, or to add/remove referrals, use ReferralLink accounts.
-    // This struct only keeps aggregate data for scalability and rent efficiency.
-
-    // Add referral earnings
+    /// Add referral earnings (claimed)
     pub fn add_referral_earnings(&mut self, earnings: u64) -> TYieldResult<()> {
         self.total_referral_earnings = self.total_referral_earnings.safe_add(earnings)?;
         Ok(())
     }
 
-    // Get average earnings per referred user
+    /// Add referral earnings (unclaimed)
+    pub fn add_unclaimed_referral_earnings(&mut self, earnings: u64) -> TYieldResult<()> {
+        self.total_referral_earnings_uc = self.total_referral_earnings_uc.safe_add(earnings)?;
+        Ok(())
+    }
+
+    /// Claim unclaimed referral earnings (move from unclaimed to claimed)
+    pub fn claim_referral_earnings(&mut self, amount: u64) -> TYieldResult<()> {
+        if amount > self.total_referral_earnings_uc {
+            return Err(ErrorCode::InsufficientFunds);
+        }
+        self.total_referral_earnings_uc = self.total_referral_earnings_uc.safe_sub(amount)?;
+        self.total_referral_earnings = self.total_referral_earnings.safe_add(amount)?;
+        Ok(())
+    }
+
+    /// Get total referral earnings (claimed)
+    pub fn get_total_referral_earnings(&self) -> u64 {
+        self.total_referral_earnings
+    }
+
+    /// Get total unclaimed referral earnings
+    pub fn get_total_unclaimed_referral_earnings(&self) -> u64 {
+        self.total_referral_earnings_uc
+    }
+
+    /// Get total referral earnings (claimed + unclaimed)
+    pub fn get_total_aggregate_referral_earnings(&self) -> u64 {
+        self.total_referral_earnings
+            .safe_add(self.total_referral_earnings_uc)
+            .unwrap_or(0)
+    }
+
+    /// Get average earnings per referred user (claimed only)
     pub fn get_average_earnings_per_user(&self) -> u64 {
+        if self.total_referred_users == 0 {
+            0
+        } else {
+            self.total_referral_earnings / self.total_referred_users as u64
+        }
+    }
+
+    /// Get average unclaimed earnings per referred user
+    pub fn get_average_unclaimed_earnings_per_user(&self) -> u64 {
         if self.total_referred_users == 0 {
             return 0;
         }
-        self.total_referral_earnings
+        self.total_referral_earnings_uc
             .safe_div(self.total_referred_users as u64)
             .unwrap_or(0)
     }
 
-    // Check if registry is full (arbitrary limit, can be removed)
-    pub fn is_full(&self) -> bool {
-        false // No fixed limit in new design
-    }
-
-    // Get available slots (not meaningful in new design)
-    pub fn get_available_slots(&self) -> u32 {
-        u32::MAX // Unlimited in new design
-    }
-
-    // Update timestamp
-    pub fn update_timestamp(&mut self, current_time: i32) {
+    /// Update the updated_at timestamp
+    pub fn update_timestamp(&mut self, current_time: i64) {
         self.updated_at = current_time;
     }
 
-    // Get days since creation
-    pub fn get_days_since_created(&self, current_time: i32) -> i32 {
+    /// Get days since creation
+    pub fn get_days_since_created(&self, current_time: i64) -> i64 {
         (current_time - self.created_at) / 86400
     }
 
-    // Get days since last update
-    pub fn get_days_since_updated(&self, current_time: i32) -> i32 {
+    /// Get days since last update
+    pub fn get_days_since_updated(&self, current_time: i64) -> i64 {
         (current_time - self.updated_at) / 86400
     }
 
-    // Validation method
+    /// Validation method
     pub fn validate_registry(&self) -> TYieldResult<()> {
         if self.referrer == Pubkey::default() {
             return Err(ErrorCode::InvalidAccount);
@@ -578,17 +592,25 @@ impl ReferralRegistry {
         Ok(())
     }
 
-    // Reset methods for testing/debugging
+    /// Reset all earnings (for testing/debugging)
     pub fn reset_earnings(&mut self) {
         self.total_referral_earnings = 0;
+        self.total_referral_earnings_uc = 0;
     }
 
-    // Get referral statistics
-    pub fn get_referral_stats(&self) -> (u32, u64, u64) {
+    /// Get referral statistics (total users, claimed, unclaimed, average per user)
+    pub fn get_referral_stats(&self) -> (u32, u64, u64, u64, u64) {
+        let avg = if self.total_referred_users > 0 {
+            self.total_referral_earnings / self.total_referred_users as u64
+        } else {
+            0
+        };
         (
             self.total_referred_users,
             self.total_referral_earnings,
-            self.get_average_earnings_per_user(),
+            avg,
+            self.total_referral_earnings_uc,
+            self.get_average_unclaimed_earnings_per_user(),
         )
     }
 }
@@ -596,28 +618,33 @@ impl ReferralRegistry {
 #[account]
 #[derive(Debug)]
 pub struct ReferralLink {
+    // 32 bytes each, 8-byte aligned
     pub referrer: Pubkey,
     pub referred_user: Pubkey,
 
-    pub created_at: i32,
+    // 4 bytes, 4-byte aligned
+    pub created_at: i64,
 
+    // 1 byte
     pub bump: u8,
-    pub _padding: [u8; 3],
+
+    // 7 bytes padding to align to 8 bytes
+    pub _padding: [u8; 7],
 }
 
 impl Size for ReferralLink {
-    const SIZE: usize = 80; // 8 (discriminator) + 72 (struct, including padding) = 80 bytes
+    const SIZE: usize = 84; // 8 (discriminator) + 76 (struct, including padding) = 84 bytes
 }
 
 impl ReferralLink {
     /// Create a new ReferralLink
-    pub fn new(referrer: Pubkey, referred_user: Pubkey, created_at: i32, bump: u8) -> Self {
+    pub fn new(referrer: Pubkey, referred_user: Pubkey, created_at: i64, bump: u8) -> Self {
         Self {
             referrer,
             referred_user,
             created_at,
             bump,
-            _padding: [0; 3],
+            _padding: [0; 7],
         }
     }
 
@@ -636,12 +663,12 @@ impl ReferralLink {
     }
 
     /// Get the age of the referral link in days
-    pub fn get_age_days(&self, current_time: i32) -> i32 {
+    pub fn get_age_days(&self, current_time: i64) -> i64 {
         (current_time - self.created_at) / 86400
     }
 
     /// Update the created_at timestamp (for migration/testing)
-    pub fn update_timestamp(&mut self, new_time: i32) {
+    pub fn update_timestamp(&mut self, new_time: i64) {
         self.created_at = new_time;
     }
 
@@ -651,7 +678,7 @@ impl ReferralLink {
         self.referred_user = Pubkey::default();
         self.created_at = 0;
         self.bump = 0;
-        self._padding = [0; 3];
+        self._padding = [0; 7];
     }
 }
 
@@ -666,12 +693,12 @@ pub enum UserStatus {
 
 // implement SIZE const for User
 impl Size for User {
-    const SIZE: usize = 208; // 8 (discriminator) + 200 (struct, including padding) = 208 bytes
+    const SIZE: usize = 200; // 8 (discriminator) + 192 (struct, including padding) = 200 bytes
 }
 
 // implement SIZE const for ReferralRegistry
 impl Size for ReferralRegistry {
-    const SIZE: usize = 72; // 8 (discriminator) + 64 (struct, including padding) = 72 bytes
+    const SIZE: usize = 96; // 8 (discriminator) + 88 (struct, including padding) = 96 bytes
 }
 
 #[event]
@@ -680,7 +707,7 @@ pub struct RegisterUserEvent {
     pub authority: Pubkey,
 
     /// Encoded display name e.g. "t_yield"
-    pub name: [u8; 32],
+    pub name: [u8; 15],
 
     /// Whether the user is active or banned
     pub status: u8,
@@ -688,7 +715,21 @@ pub struct RegisterUserEvent {
     /// Referrer's public key (zero if no referrer)
     pub referrer: Pubkey,
 
-    pub created_at: i32,
+    pub created_at: i64,
+}
+
+#[event]
+pub struct UpdateUserStatusEvent {
+    /// The owner/authority of the account
+    pub authority: Pubkey,
+
+    /// Encoded display name e.g. "t_yield"
+    pub name: [u8; 15],
+
+    /// Whether the user is active or banned
+    pub status: u8,
+
+    pub updated_at: i64,
 }
 
 #[cfg(test)]
@@ -745,18 +786,17 @@ mod tests {
         let user = User::default();
         assert_eq!(user.authority, Pubkey::default());
         assert_eq!(user.delegate, Pubkey::default());
-        assert_eq!(user.name, [0; 32]);
+        assert_eq!(user.name, [0; 15]);
         assert_eq!(user.total_agents_owned, 0);
         assert_eq!(user.total_agents_purchased, 0);
         assert_eq!(user.total_unclaimed_yield, 0);
         assert_eq!(user.status, UserStatus::Banned as u8);
         assert_eq!(user.idle, false);
-        assert_eq!(user._padding1, [0; 2]);
+        assert_eq!(user._padding, [0; 7]);
         assert_eq!(user.referrer, Pubkey::default());
         assert_eq!(user.updated_at, 0);
         assert_eq!(user.created_at, 0);
         assert_eq!(user.bump, 0);
-        assert_eq!(user._padding2, [0; 3]);
     }
 
     // Status management tests
@@ -949,7 +989,7 @@ mod tests {
         let mut user = create_test_user();
 
         let test_name = b"test_user_name";
-        let mut name_array = [0u8; 32];
+        let mut name_array = [0u8; 15];
         name_array[..test_name.len()].copy_from_slice(test_name);
 
         user.set_name(name_array);
@@ -958,7 +998,7 @@ mod tests {
 
         // Test with null bytes
         let name_with_nulls = [b't', b'e', b's', b't', 0, 0, 0];
-        let mut name_array = [0u8; 32];
+        let mut name_array = [0u8; 15];
         name_array[..7].copy_from_slice(&name_with_nulls);
 
         user.set_name(name_array);
@@ -1149,6 +1189,15 @@ mod tests {
         registry.add_referral_earnings(1000).unwrap();
 
         let stats = registry.get_referral_stats();
+        println!("Debug: stats = {:?}", stats);
+        println!(
+            "Debug: total_referred_users = {}",
+            registry.total_referred_users
+        );
+        println!(
+            "Debug: total_referral_earnings = {}",
+            registry.total_referral_earnings
+        );
         assert_eq!(stats.0, 1); // total users
         assert_eq!(stats.1, 1000); // total earnings
         assert_eq!(stats.2, 1000); // average earnings
@@ -1304,7 +1353,7 @@ mod tests {
 
         // Set name
         let name = b"test_user_123";
-        let mut name_array = [0u8; 32];
+        let mut name_array = [0u8; 15];
         name_array[..name.len()].copy_from_slice(name);
         user.set_name(name_array);
 
@@ -1370,8 +1419,6 @@ mod tests {
 
         // Test with no users
         assert_eq!(registry.get_average_earnings_per_user(), 0);
-        assert_eq!(registry.get_available_slots(), u32::MAX);
-        assert!(!registry.is_full());
 
         // Test with one user and earnings
         let _user = Pubkey::new_unique();
@@ -1483,6 +1530,6 @@ mod tests {
         assert_eq!(link.referred_user, Pubkey::default());
         assert_eq!(link.created_at, 0);
         assert_eq!(link.bump, 0);
-        assert_eq!(link._padding, [0; 3]);
+        assert_eq!(link._padding, [0; 7]);
     }
 }

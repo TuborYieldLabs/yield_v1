@@ -4,6 +4,16 @@ use crate::error::{ErrorCode, TYieldResult};
 use crate::math::{SafeMath, PERCENTAGE_PRECISION_U64, QUOTE_PRECISION_U64};
 use crate::state::Size;
 
+#[derive(Debug, Clone)]
+pub struct AgentPrice {
+    pub total_price: u64,
+    pub tax_amount: u64,
+    pub base_price: u64,
+}
+
+#[event]
+pub struct UpdatePriceEvent {}
+
 /// Parameters for initializing a MasterAgent
 #[derive(Debug, Clone)]
 pub struct MasterAgentInitParams {
@@ -14,7 +24,7 @@ pub struct MasterAgentInitParams {
     pub trading_status: TradingStatus,
     pub max_supply: u64,
     pub auto_relist: bool,
-    pub current_time: i32,
+    pub current_time: i64,
     pub bump: u8,
 }
 
@@ -48,14 +58,18 @@ pub struct MasterAgent {
     pub agent_count: u64,  // 8 bytes
     pub trade_count: u64,  // 8 bytes
 
+    /// PRECISION: DAILY_SECONDS_PRECISION
+    pub price_update_allowance: u64,
+
     pub completed_trades: u64,
 
     /// QUOTE PRECISION
     pub total_pnl: u64,
 
     // 4-byte aligned fields
-    pub last_updated: i32, // 4 bytes
-    pub created_at: i32,   // 4 bytes
+    pub last_updated: i64, // 4 bytes
+    pub created_at: i64,   // 4 bytes
+    pub last_price_update: i64,
 
     // 1-byte aligned fields (smallest last)
     pub trading_status: u8, // 1 byte
@@ -63,7 +77,7 @@ pub struct MasterAgent {
     pub bump: u8,           // 1 byte
 
     // Future-proofing padding
-    pub _padding: [u8; 8], // 8 bytes for future additions
+    pub _padding: [u8; 5], // 7 bytes for future additions
 }
 
 impl MasterAgent {
@@ -85,9 +99,12 @@ impl MasterAgent {
     }
 
     /// Update the price of the master agent
-    pub fn update_price(&mut self, new_price: u64, current_time: i32) -> TYieldResult<()> {
+    pub fn update_price(&mut self, new_price: u64, current_time: i64) -> TYieldResult<()> {
         if new_price == 0 {
             return Err(ErrorCode::InvalidEntryPrice);
+        }
+        if new_price <= self.price {
+            return Err(ErrorCode::MathError); // Or define a new error: PriceNotIncreasing
         }
         self.price = new_price;
         self.last_updated = current_time;
@@ -95,7 +112,7 @@ impl MasterAgent {
     }
 
     /// Update the yield percentage
-    pub fn update_yield(&mut self, new_yield: u64, current_time: i32) -> TYieldResult<()> {
+    pub fn update_yield(&mut self, new_yield: u64, current_time: i64) -> TYieldResult<()> {
         if new_yield > PERCENTAGE_PRECISION_U64 {
             return Err(ErrorCode::MathError);
         }
@@ -108,7 +125,7 @@ impl MasterAgent {
     pub fn update_max_supply(
         &mut self,
         new_max_supply: u64,
-        current_time: i32,
+        current_time: i64,
     ) -> TYieldResult<()> {
         if new_max_supply < self.agent_count {
             return Err(ErrorCode::MathError);
@@ -119,7 +136,7 @@ impl MasterAgent {
     }
 
     /// Add an agent to the master agent
-    pub fn add_agent(&mut self, current_time: i32) -> TYieldResult<()> {
+    pub fn add_agent(&mut self, current_time: i64) -> TYieldResult<()> {
         if self.agent_count >= self.max_supply {
             return Err(ErrorCode::InsufficientFunds);
         }
@@ -129,7 +146,7 @@ impl MasterAgent {
     }
 
     /// Remove an agent from the master agent
-    pub fn remove_agent(&mut self, current_time: i32) -> TYieldResult<()> {
+    pub fn remove_agent(&mut self, current_time: i64) -> TYieldResult<()> {
         if self.agent_count == 0 {
             return Err(ErrorCode::InsufficientFunds);
         }
@@ -139,20 +156,20 @@ impl MasterAgent {
     }
 
     /// Increment trade count
-    pub fn increment_trade_count(&mut self, current_time: i32) -> TYieldResult<()> {
+    pub fn increment_trade_count(&mut self, current_time: i64) -> TYieldResult<()> {
         self.trade_count = self.trade_count.safe_add(1)?;
         self.last_updated = current_time;
         Ok(())
     }
 
     /// Toggle auto relist setting
-    pub fn toggle_auto_relist(&mut self, current_time: i32) {
+    pub fn toggle_auto_relist(&mut self, current_time: i64) {
         self.auto_relist = !self.auto_relist;
         self.last_updated = current_time;
     }
 
     /// Set auto relist setting
-    pub fn set_auto_relist(&mut self, auto_relist: bool, current_time: i32) {
+    pub fn set_auto_relist(&mut self, auto_relist: bool, current_time: i64) {
         self.auto_relist = auto_relist;
         self.last_updated = current_time;
     }
@@ -167,7 +184,7 @@ impl MasterAgent {
     }
 
     /// Set the trading status
-    pub fn set_trading_status(&mut self, status: TradingStatus, current_time: i32) {
+    pub fn set_trading_status(&mut self, status: TradingStatus, current_time: i64) {
         self.trading_status = status as u8;
         self.last_updated = current_time;
     }
@@ -183,7 +200,7 @@ impl MasterAgent {
     }
 
     /// Toggle between whitelist and public mode
-    pub fn toggle_trading_status(&mut self, current_time: i32) {
+    pub fn toggle_trading_status(&mut self, current_time: i64) {
         let new_status = if self.is_whitelist_mode() {
             TradingStatus::Public
         } else {
@@ -242,12 +259,12 @@ impl MasterAgent {
     }
 
     /// Get days since creation
-    pub fn get_days_since_created(&self, current_time: i32) -> i32 {
+    pub fn get_days_since_created(&self, current_time: i64) -> i64 {
         (current_time - self.created_at) / 86400 // 86400 seconds in a day
     }
 
     /// Get days since last update
-    pub fn get_days_since_updated(&self, current_time: i32) -> i32 {
+    pub fn get_days_since_updated(&self, current_time: i64) -> i64 {
         (current_time - self.last_updated) / 86400
     }
 
@@ -257,7 +274,7 @@ impl MasterAgent {
     }
 
     /// Check if the master agent is idle (no recent activity)
-    pub fn is_idle(&self, current_time: i32, idle_threshold: i32) -> bool {
+    pub fn is_idle(&self, current_time: i64, idle_threshold: i64) -> bool {
         let time_since_last_activity = current_time - self.last_updated;
         time_since_last_activity > idle_threshold
     }
@@ -289,9 +306,12 @@ impl MasterAgent {
             return Err(ErrorCode::InvalidAccount);
         }
         // Validate trading status
-        match self.get_trading_status() {
-            TradingStatus::WhiteList | TradingStatus::Public => Ok(()),
-        }?;
+        if !matches!(
+            self.get_trading_status(),
+            TradingStatus::WhiteList | TradingStatus::Public
+        ) {
+            return Err(ErrorCode::CannotPerformAction);
+        }
         Ok(())
     }
 
@@ -337,7 +357,7 @@ impl MasterAgent {
     }
 
     /// Get trading activity score (trades per day since creation)
-    pub fn get_trading_activity_score(&self, current_time: i32) -> u64 {
+    pub fn get_trading_activity_score(&self, current_time: i64) -> u64 {
         let days_since_created = self.get_days_since_created(current_time);
         if days_since_created == 0 {
             return self.trade_count;
@@ -348,7 +368,7 @@ impl MasterAgent {
     }
 
     /// Get performance metrics
-    pub fn get_performance_metrics(&self, current_time: i32) -> TYieldResult<(u64, u64, u64, u64)> {
+    pub fn get_performance_metrics(&self, current_time: i64) -> TYieldResult<(u64, u64, u64, u64)> {
         let total_value = self.get_total_value_locked();
         let total_yield = self.get_total_yield_generated()?;
         let yield_efficiency = self.get_yield_efficiency()?;
@@ -377,7 +397,7 @@ impl MasterAgent {
     }
 
     /// Check if the master agent needs attention (low activity, high supply utilization, etc.)
-    pub fn needs_attention(&self, current_time: i32) -> bool {
+    pub fn needs_attention(&self, current_time: i64) -> bool {
         let days_since_update = self.get_days_since_updated(current_time);
         let supply_utilization = self.get_supply_utilization_percentage();
 
@@ -580,6 +600,42 @@ impl MasterAgent {
 
         Ok((buy_tax_rate, sell_tax_rate, max_tax_rate))
     }
+
+    /// Check if the price can be updated based on time allowance and max price increase
+    /// - now: current unix timestamp (seconds)
+    /// - new_price: the proposed new price
+    /// - max_agent_price_new: max allowed price as a percentage of current price (e.g., 11000 = 110%)
+    ///
+    /// Returns Ok(()) if allowed, or an error otherwise
+    pub fn can_update_price(
+        &self,
+        new_price: u64,
+        now: i64,
+        max_agent_price_new: u64,
+    ) -> TYieldResult<()> {
+        use crate::math::{DAILY_SECONDS_PRECISION, PERCENTAGE_PRECISION_U64};
+        // Check time allowance
+        let seconds_since_last_update = now.safe_sub(self.last_price_update)?;
+        if seconds_since_last_update < 0 {
+            return Err(ErrorCode::PriceUpdateTooSoon);
+        }
+        let seconds_since_last_update = seconds_since_last_update as u64;
+        let min_seconds = self
+            .price_update_allowance
+            .safe_mul(DAILY_SECONDS_PRECISION)?;
+        if seconds_since_last_update < min_seconds {
+            return Err(ErrorCode::PriceUpdateTooSoon);
+        }
+        // Check max price increase
+        let max_allowed_price = self
+            .price
+            .safe_mul(max_agent_price_new)?
+            .safe_div(PERCENTAGE_PRECISION_U64)?;
+        if new_price > max_allowed_price {
+            return Err(ErrorCode::PriceUpdateTooHigh);
+        }
+        Ok(())
+    }
 }
 
 impl Default for MasterAgent {
@@ -590,8 +646,10 @@ impl Default for MasterAgent {
             trading_status: TradingStatus::WhiteList as u8,
             price: 0,
             w_yield: 0,
+            price_update_allowance: 0,
             max_supply: 0,
             agent_count: 0,
+            last_price_update: 0,
             trade_count: 0,
             completed_trades: 0,
             total_pnl: 0,
@@ -599,7 +657,7 @@ impl Default for MasterAgent {
             last_updated: 0,
             created_at: 0,
             bump: 0,
-            _padding: [0; 8],
+            _padding: [0; 5],
         }
     }
 }
@@ -611,7 +669,7 @@ pub enum TradingStatus {
 }
 
 impl Size for MasterAgent {
-    const SIZE: usize = 152; // 8 (discriminator) + 144 (struct, including alignment/padding) = 152 bytes
+    const SIZE: usize = 168; // 8 (discriminator) + 160 (struct, including alignment/padding) = 168 bytes
 }
 
 #[cfg(test)]
@@ -666,7 +724,7 @@ mod tests {
         assert_eq!(master_agent.trading_status, TradingStatus::WhiteList as u8);
         assert_eq!(master_agent.auto_relist, false);
         assert_eq!(master_agent.bump, 0);
-        assert_eq!(master_agent._padding, [0; 8]);
+        assert_eq!(master_agent._padding, [0; 5]);
     }
 
     #[test]
@@ -1545,5 +1603,51 @@ mod tests {
         assert_eq!(base_price, 1_000_000_000);
         assert_eq!(tax_amount, 25_000_000); // 2.5% of 1 billion
         assert_eq!(net_price, 975_000_000);
+    }
+
+    #[test]
+    fn test_can_update_price() {
+        let mut master_agent = create_test_master_agent();
+        let now = 1_700_000_000; // arbitrary current time
+        let base_price = 1_000_000;
+        master_agent.price = base_price;
+        master_agent.last_price_update = now - 2 * 86_400; // 2 days ago
+        master_agent.price_update_allowance = 2; // 2 days
+
+        // max_agent_price_new = 11000 (110%)
+        let max_agent_price_new = 11_000;
+        let allowed_price = base_price * max_agent_price_new / 10_000;
+
+        // Case 1: Not enough time passed
+        master_agent.last_price_update = now - 1 * 86_400; // 1 day ago
+        let result = master_agent.can_update_price(base_price, now, max_agent_price_new);
+        assert!(result.is_err());
+        // Optionally check error code if needed
+
+        // Case 2: Price too high
+        master_agent.last_price_update = now - 2 * 86_400; // 2 days ago
+        let too_high_price = allowed_price + 1;
+        let result = master_agent.can_update_price(too_high_price, now, max_agent_price_new);
+        assert!(result.is_err());
+
+        // Case 3: Both conditions met (should succeed)
+        let result = master_agent.can_update_price(allowed_price, now, max_agent_price_new);
+        assert!(result.is_ok());
+
+        // Case 4: Edge case - exactly at time and price limit
+        master_agent.last_price_update = now - 2 * 86_400; // exactly at allowance
+        let result = master_agent.can_update_price(allowed_price, now, max_agent_price_new);
+        assert!(result.is_ok());
+
+        // Case 5: Error propagation (simulate underflow)
+        // Set now < last_price_update
+        master_agent.last_price_update = now + 100;
+        println!(
+            "Debug: now = {}, last_price_update = {}",
+            now, master_agent.last_price_update
+        );
+        let result = master_agent.can_update_price(base_price, now, max_agent_price_new);
+        println!("Debug: result = {:?}", result);
+        assert!(result.is_err());
     }
 }

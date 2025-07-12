@@ -9,10 +9,10 @@ use crate::{
 
 #[repr(C, packed)]
 #[account(zero_copy)]
-#[derive(Default, PartialEq)]
+#[derive(Default, PartialEq, Debug)]
 pub struct Multisig {
     // Large arrays first (32-byte alignment)
-    pub signers: [Pubkey; 6], // Array of authorized signer public keys (192 bytes)
+    pub signers: [Pubkey; MAX_SIGNERS], // Array of authorized signer public keys (192 bytes)
 
     // 64-bit fields
     pub instruction_hash: u64, // Hash of the instruction being signed
@@ -28,14 +28,14 @@ pub struct Multisig {
     pub instruction_accounts_len: u8, // Number of accounts in the instruction
 
     // Small arrays
-    pub signed: [u8; 6], // Bitmap tracking which signers have signed (0/1)
+    pub signed: [u8; MAX_SIGNERS], // Bitmap tracking which signers have signed (0/1)
 
     // Padding for future proofing
-    pub _padding: [u8; 32], // Padding for future extensibility
+    pub _padding: [u8; 3], // Padding for future extensibility
 }
 
 pub enum AdminInstruction {
-    CreateUser,
+    UpdatePrice,
     DeployAgent,
     AddAgent,
     BanUser,
@@ -45,17 +45,7 @@ pub enum AdminInstruction {
 }
 
 impl Size for Multisig {
-    const SIZE: usize = 8 + // discriminator (Anchor handles this)
-                       32 * 6 + // signers (6 * Pubkey = 192 bytes)
-                       8 + // instruction_hash (u64)
-                       2 + // instruction_data_len (u16)
-                       1 + // num_signers (u8)
-                       1 + // num_signed (u8)
-                       1 + // min_signatures (u8)
-                       1 + // bump (u8)
-                       1 + // instruction_accounts_len (u8)
-                       6 + // signed (6 * u8)
-                       32; // padding
+    const SIZE: usize = 224;
 }
 
 impl Multisig {
@@ -147,7 +137,7 @@ impl Multisig {
             instruction_hash: 0,
             signers,
             signed,
-            _padding: [0; 32],
+            _padding: [0; 3],
         };
 
         Ok(())
@@ -178,7 +168,7 @@ impl Multisig {
 
         let instruction_hash =
             Multisig::get_instruction_hash(instruction_accounts, instruction_data);
-        if instruction_hash[..] != self.instruction_hash.to_le_bytes()
+        if instruction_hash[..8] != self.instruction_hash.to_le_bytes()
             || instruction_accounts.len() != self.instruction_accounts_len as usize
             || instruction_data.len() != self.instruction_data_len as usize
         {
@@ -261,19 +251,415 @@ impl Multisig {
 mod tests {
     use super::*;
 
+    // Helper function to create mock account infos
+    fn create_mock_account_info(key: Pubkey, is_signer: bool) -> AccountInfo<'static> {
+        // Each call gets its own heap allocations to avoid test state leakage
+        let key_ref = Box::leak(Box::new(key));
+        let lamports = Box::leak(Box::new(0u64));
+        let data = Box::leak(Box::new(Vec::<u8>::new()));
+        let owner = Box::leak(Box::new(Pubkey::default()));
+        AccountInfo::new(key_ref, is_signer, false, lamports, data, owner, false, 0)
+    }
+
     #[test]
     fn test_multisig_size() {
         // On-chain size includes 8 bytes for Anchor discriminator
         assert_eq!(8 + std::mem::size_of::<Multisig>(), Multisig::SIZE);
         println!("Multisig on-chain size: {} bytes", Multisig::SIZE);
+
+        // Verify the manual calculation matches the actual size
+        let expected_size = 8 + // discriminator
+                           32 * MAX_SIGNERS + // signers
+                           8 + // instruction_hash
+                           2 + // instruction_data_len
+                           1 + // num_signers
+                           1 + // num_signed
+                           1 + // min_signatures
+                           1 + // bump
+                           1 + // instruction_accounts_len
+                           MAX_SIGNERS + // signed
+                           3; // padding
+        assert_eq!(expected_size, Multisig::SIZE);
     }
 
     #[test]
     fn test_multisig_memory_layout() {
-        // Test that Multisig struct can be created
-        // Note: Cannot directly access packed struct fields due to alignment issues
+        // Test that Multisig struct can be created and serialized
         let _multisig = Multisig::default();
-        // Just verify the struct can be created without panicking
-        assert_eq!(std::mem::size_of::<Multisig>(), Multisig::SIZE - 8);
+        assert_eq!(Multisig::SIZE, 224);
+        println!("Multisig on-chain size: {} bytes", Multisig::SIZE);
+    }
+
+    #[test]
+    fn test_get_instruction_hash() {
+        let key1 = Pubkey::new_unique();
+        let key2 = Pubkey::new_unique();
+        let accounts = vec![
+            create_mock_account_info(key1, false),
+            create_mock_account_info(key2, false),
+        ];
+        let data = vec![1, 2, 3, 4];
+
+        let hash = Multisig::get_instruction_hash(&accounts, &data);
+        assert_eq!(hash.len(), 32);
+
+        // Same inputs should produce same hash
+        let hash2 = Multisig::get_instruction_hash(&accounts, &data);
+        assert_eq!(hash, hash2);
+
+        // Different data should produce different hash
+        let data2 = vec![1, 2, 3, 5];
+        let hash3 = Multisig::get_instruction_hash(&accounts, &data2);
+        assert_ne!(hash, hash3);
+    }
+
+    #[test]
+    fn test_get_instruction_hash_empty_data() {
+        let key1 = Pubkey::new_unique();
+        let accounts = vec![create_mock_account_info(key1, false)];
+        let data = vec![];
+
+        let hash = Multisig::get_instruction_hash(&accounts, &data);
+        assert_eq!(hash.len(), 32);
+    }
+
+    #[test]
+    fn test_get_signer_index() {
+        let mut multisig = Multisig::default();
+        let signer1 = Pubkey::new_unique();
+        let signer2 = Pubkey::new_unique();
+        let signer3 = Pubkey::new_unique();
+
+        // Set up multisig with 3 signers
+        let accounts = vec![
+            create_mock_account_info(signer1, true),
+            create_mock_account_info(signer2, true),
+            create_mock_account_info(signer3, true),
+        ];
+        multisig.set_signers(&accounts, 2).unwrap();
+
+        // Test finding existing signers
+        assert_eq!(multisig.get_signer_index(&signer1).unwrap(), 0);
+        assert_eq!(multisig.get_signer_index(&signer2).unwrap(), 1);
+        assert_eq!(multisig.get_signer_index(&signer3).unwrap(), 2);
+
+        // Test finding non-existent signer
+        let non_signer = Pubkey::new_unique();
+        assert!(multisig.get_signer_index(&non_signer).is_err());
+    }
+
+    #[test]
+    fn test_set_signers() {
+        let mut multisig = Multisig::default();
+        let signer1 = Pubkey::new_unique();
+        let signer2 = Pubkey::new_unique();
+
+        let accounts = vec![
+            create_mock_account_info(signer1, true),
+            create_mock_account_info(signer2, true),
+        ];
+
+        // Test successful setup
+        let result = multisig.set_signers(&accounts, 2);
+        assert!(result.is_ok());
+        assert_eq!(multisig.num_signers, 2);
+        assert_eq!(multisig.min_signatures, 2);
+        assert_eq!(multisig.num_signed, 0);
+        assert_eq!(multisig.signers[0], signer1);
+        assert_eq!(multisig.signers[1], signer2);
+    }
+
+    #[test]
+    fn test_set_signers_empty_signers() {
+        let mut multisig = Multisig::default();
+        let accounts = vec![];
+
+        let result = multisig.set_signers(&accounts, 1);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_set_signers_zero_min_signatures() {
+        let mut multisig = Multisig::default();
+        let signer1 = Pubkey::new_unique();
+        let accounts = vec![create_mock_account_info(signer1, true)];
+
+        let result = multisig.set_signers(&accounts, 0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_set_signers_min_signatures_exceeds_signers() {
+        let mut multisig = Multisig::default();
+        let signer1 = Pubkey::new_unique();
+        let accounts = vec![create_mock_account_info(signer1, true)];
+
+        let result = multisig.set_signers(&accounts, 2);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_set_signers_duplicate_signers() {
+        let mut multisig = Multisig::default();
+        let signer1 = Pubkey::new_unique();
+        let accounts = vec![
+            create_mock_account_info(signer1, true),
+            create_mock_account_info(signer1, true), // Duplicate
+        ];
+
+        let result = multisig.set_signers(&accounts, 1);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_sign_multisig_single_signer() {
+        let mut multisig = Multisig::default();
+        let signer1 = Pubkey::new_unique();
+        let accounts = vec![create_mock_account_info(signer1, true)];
+
+        multisig.set_signers(&accounts, 1).unwrap();
+
+        let signer_account = create_mock_account_info(signer1, true);
+        let instruction_accounts = vec![];
+        let instruction_data = vec![1, 2, 3];
+
+        let result =
+            multisig.sign_multisig(&signer_account, &instruction_accounts, &instruction_data);
+        assert_eq!(result.unwrap(), 0); // No more signatures needed
+    }
+
+    #[test]
+    fn test_sign_multisig_not_signer() {
+        let mut multisig = Multisig::default();
+        let signer1 = Pubkey::new_unique();
+        let accounts = vec![create_mock_account_info(signer1, true)];
+
+        multisig.set_signers(&accounts, 1).unwrap();
+
+        let non_signer = Pubkey::new_unique();
+        let signer_account = create_mock_account_info(non_signer, true);
+        let instruction_accounts = vec![];
+        let instruction_data = vec![1, 2, 3];
+
+        let result =
+            multisig.sign_multisig(&signer_account, &instruction_accounts, &instruction_data);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_sign_multisig_not_signed() {
+        let mut multisig = Multisig::default();
+        let signer1 = Pubkey::new_unique();
+        let signer2 = Pubkey::new_unique();
+        let accounts = vec![
+            create_mock_account_info(signer1, true),
+            create_mock_account_info(signer2, true),
+        ];
+
+        multisig.set_signers(&accounts, 2).unwrap();
+
+        let signer_account = create_mock_account_info(signer1, false); // Not signed
+        let instruction_accounts = vec![];
+        let instruction_data = vec![1, 2, 3];
+
+        let result =
+            multisig.sign_multisig(&signer_account, &instruction_accounts, &instruction_data);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_sign_multisig_multi_signer_flow() {
+        let mut multisig = Multisig::default();
+        let signer1 = Pubkey::new_unique();
+        let signer2 = Pubkey::new_unique();
+        let signer3 = Pubkey::new_unique();
+
+        // Store AccountInfo objects in a Vec<AccountInfo>
+        let accounts = vec![
+            create_mock_account_info(signer1, true),
+            create_mock_account_info(signer2, true),
+            create_mock_account_info(signer3, true),
+        ];
+
+        multisig.set_signers(&accounts, 2).unwrap();
+
+        let instruction_accounts: Vec<AccountInfo> = vec![];
+        let instruction_data = vec![1, 2, 3];
+
+        // First signature
+        let result = multisig.sign_multisig(&accounts[0], &instruction_accounts, &instruction_data);
+        assert_eq!(result.unwrap(), 1); // 1 more signature needed
+
+        // Second signature
+        let result = multisig.sign_multisig(&accounts[1], &instruction_accounts, &instruction_data);
+        assert_eq!(result.unwrap(), 0); // No more signatures needed
+
+        // Third signature (should fail, already executed)
+        let result = multisig.sign_multisig(&accounts[2], &instruction_accounts, &instruction_data);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_sign_multisig_already_signed() {
+        let mut multisig = Multisig::default();
+        let signer1 = Pubkey::new_unique();
+        let accounts = vec![create_mock_account_info(signer1, true)];
+
+        multisig.set_signers(&accounts, 1).unwrap();
+
+        let signer_account = create_mock_account_info(signer1, true);
+        let instruction_accounts = vec![];
+        let instruction_data = vec![1, 2, 3];
+
+        // First signature
+        let result =
+            multisig.sign_multisig(&signer_account, &instruction_accounts, &instruction_data);
+        assert_eq!(result.unwrap(), 0);
+
+        // Try to sign again (should reset because single signer always resets)
+        let result =
+            multisig.sign_multisig(&signer_account, &instruction_accounts, &instruction_data);
+        assert_eq!(result.unwrap(), 0);
+    }
+
+    #[test]
+    fn test_unsign_multisig() {
+        let mut multisig = Multisig::default();
+        let signer1 = Pubkey::new_unique();
+        let signer2 = Pubkey::new_unique();
+        let accounts = vec![
+            create_mock_account_info(signer1, true),
+            create_mock_account_info(signer2, true),
+        ];
+
+        multisig.set_signers(&accounts, 2).unwrap();
+
+        let signer1_account = create_mock_account_info(signer1, true);
+        let signer2_account = create_mock_account_info(signer2, true);
+        let instruction_accounts = vec![];
+        let instruction_data = vec![1, 2, 3];
+
+        // Sign with both signers
+        multisig
+            .sign_multisig(&signer1_account, &instruction_accounts, &instruction_data)
+            .unwrap();
+        multisig
+            .sign_multisig(&signer2_account, &instruction_accounts, &instruction_data)
+            .unwrap();
+
+        // Unsign one (should not decrement after execution)
+        let result = multisig.unsign_multisig(&signer1_account);
+        assert!(result.is_ok());
+        // Only the bitmap should change
+        assert_eq!(multisig.signed[0], 0);
+        assert_eq!(multisig.signed[1], 1);
+    }
+
+    #[test]
+    fn test_unsign_multisig_not_signer() {
+        let mut multisig = Multisig::default();
+        let signer1 = Pubkey::new_unique();
+        let accounts = vec![create_mock_account_info(signer1, true)];
+
+        multisig.set_signers(&accounts, 1).unwrap();
+
+        let non_signer = Pubkey::new_unique();
+        let non_signer_account = create_mock_account_info(non_signer, false);
+        let result = multisig.unsign_multisig(&non_signer_account);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_is_signer() {
+        let mut multisig = Multisig::default();
+        let signer1 = Pubkey::new_unique();
+        let signer2 = Pubkey::new_unique();
+        let accounts = vec![
+            create_mock_account_info(signer1, true),
+            create_mock_account_info(signer2, true),
+        ];
+
+        multisig.set_signers(&accounts, 2).unwrap();
+
+        assert!(multisig.is_signer(&signer1).unwrap());
+        assert!(multisig.is_signer(&signer2).unwrap());
+
+        let non_signer = Pubkey::new_unique();
+        assert!(!multisig.is_signer(&non_signer).unwrap());
+    }
+
+    #[test]
+    fn test_get_instruction_data() {
+        #[derive(AnchorSerialize)]
+        struct TestParams {
+            value: u64,
+            flag: bool,
+        }
+
+        let params = TestParams {
+            value: 12345,
+            flag: true,
+        };
+
+        let result = Multisig::get_instruction_data(AdminInstruction::UpdatePrice, &params);
+        assert!(result.is_ok());
+
+        let data = result.unwrap();
+        assert!(!data.is_empty());
+
+        // The last byte should be the instruction type
+        assert_eq!(data[data.len() - 1], AdminInstruction::UpdatePrice as u8);
+    }
+
+    #[test]
+    fn test_admin_instruction_values() {
+        // Test that all AdminInstruction variants have unique values
+        let mut values = std::collections::HashSet::new();
+
+        values.insert(AdminInstruction::UpdatePrice as u8);
+        values.insert(AdminInstruction::DeployAgent as u8);
+        values.insert(AdminInstruction::AddAgent as u8);
+        values.insert(AdminInstruction::BanUser as u8);
+        values.insert(AdminInstruction::PermManager as u8);
+        values.insert(AdminInstruction::WithdrawFees as u8);
+        values.insert(AdminInstruction::OpenTrade as u8);
+
+        // All values should be unique
+        assert_eq!(values.len(), 7);
+    }
+
+    #[test]
+    fn test_multisig_default_state() {
+        let multisig = Multisig::default();
+
+        // Test that default creates a valid multisig
+        assert_eq!(multisig.num_signers, 0);
+        assert_eq!(multisig.num_signed, 0);
+        assert_eq!(multisig.min_signatures, 0);
+        assert_eq!(multisig.bump, 0);
+        assert_eq!(multisig.instruction_accounts_len, 0);
+
+        // Check that arrays are properly initialized
+        for i in 0..MAX_SIGNERS {
+            assert_eq!(multisig.signers[i], Pubkey::default());
+            assert_eq!(multisig.signed[i], 0);
+        }
+    }
+
+    #[test]
+    fn test_multisig_partial_eq() {
+        let mut multisig1 = Multisig::default();
+        let mut multisig2 = Multisig::default();
+
+        // Should be equal when both are default
+        assert_eq!(multisig1, multisig2);
+
+        // Should not be equal after modification
+        multisig1.num_signers = 1;
+        assert_ne!(multisig1, multisig2);
+
+        // Should be equal again after same modification
+        multisig2.num_signers = 1;
+        assert_eq!(multisig1, multisig2);
     }
 }

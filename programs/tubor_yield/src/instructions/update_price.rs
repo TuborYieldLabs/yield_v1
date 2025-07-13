@@ -17,6 +17,7 @@ use anchor_lang::prelude::*;
 
 use crate::{
     error::{ErrorCode, TYieldResult},
+    math::SafeMath,
     state::{AdminInstruction, MasterAgent, Multisig, TYield, UpdatePriceEvent},
 };
 
@@ -104,10 +105,15 @@ pub fn update_price<'info>(
     let instruction_data = Multisig::get_instruction_data(AdminInstruction::UpdatePrice, &params)
         .map_err(|_| ErrorCode::InvalidInstructionHash)?;
 
+    let current_time = ctx.accounts.t_yield.get_time()?;
+    let nonce = current_time as u64; // Use current time as nonce for simplicity
+
     let signatures_left = multisig.sign_multisig(
         &ctx.accounts.authority,
         &Multisig::get_account_infos(&ctx)[1..],
         &instruction_data,
+        nonce,
+        current_time,
     )?;
     if signatures_left > 0 {
         msg!(
@@ -121,11 +127,49 @@ pub fn update_price<'info>(
     let t_yield = ctx.accounts.t_yield.as_ref();
     let current_time = ctx.accounts.t_yield.get_time()?;
 
-    master_agent.can_update_price(params.new_price, current_time, t_yield.max_agent_price_new)?;
+    master_agent.can_update_price_secure_with_time(
+        params.new_price,
+        t_yield.max_agent_price_new,
+        &ctx.accounts.authority.key(),
+        current_time,
+    )?;
 
-    master_agent.update_price(params.new_price, current_time)?;
+    master_agent.update_price(
+        params.new_price,
+        current_time,
+        &ctx.accounts.authority.key(),
+    )?;
 
-    emit_cpi!(UpdatePriceEvent {});
+    // Calculate price change and percentage
+    let old_price = master_agent.price;
+    let new_price = params.new_price;
+    let price_change = new_price as i64 - old_price as i64;
+    let price_change_percentage = if old_price > 0 {
+        (price_change as u64).safe_mul(10000)?.safe_div(old_price)?
+    } else {
+        0
+    };
+
+    // Calculate total value locked before and after
+    let old_total_value_locked = master_agent.get_total_value_locked();
+    let new_total_value_locked = master_agent.agent_count.safe_mul(new_price)?;
+
+    emit_cpi!(UpdatePriceEvent {
+        authority: ctx.accounts.authority.key(),
+        mint: ctx.accounts.master_agent_mint.key(),
+        old_price,
+        new_price,
+        price_change,
+        price_change_percentage,
+        timestamp: current_time,
+        agent_count: master_agent.agent_count,
+        trade_count: master_agent.trade_count,
+        yield_rate: master_agent.w_yield,
+        trading_status: master_agent.trading_status,
+        old_total_value_locked,
+        new_total_value_locked,
+        bump: master_agent.bump,
+    });
 
     Ok(0)
 }

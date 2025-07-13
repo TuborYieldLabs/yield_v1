@@ -14,7 +14,7 @@ use mpl_token_metadata::ID as METADATA_PROGRAM_ID;
 use crate::{
     error::{ErrorCode, TYieldResult},
     math::SafeMath,
-    state::{Agent, BuyAgentEvent, MasterAgent, TYield, TaxConfig, TransferAgentParams, User},
+    state::{Agent, BuyAgentEvent, MasterAgent, TYield, TransferAgentParams, User},
     try_from,
 };
 
@@ -169,7 +169,7 @@ pub fn buy_agent<'info>(ctx: Context<'_, '_, '_, 'info, BuyAgent<'info>>) -> TYi
     let t_yield = ctx.accounts.t_yield.as_mut();
 
     // --- Access control checks ---
-    if user.has_status(crate::state::UserStatus::Banned) {
+    if !user.can_perform_actions() {
         return Err(ErrorCode::CannotPerformAction);
     }
     if master_agent.is_whitelist_mode() && !user.is_whitelisted() {
@@ -180,12 +180,7 @@ pub fn buy_agent<'info>(ctx: Context<'_, '_, '_, 'info, BuyAgent<'info>>) -> TYi
     }
 
     // --- Price/tax calculation ---
-    let tax_config = TaxConfig {
-        buy_tax_percentage: t_yield.buy_tax,
-        sell_tax_percentage: t_yield.sell_tax,
-        max_tax_percentage: t_yield.max_tax_percentage,
-    };
-    let price = master_agent.calculate_buy_price_with_tax(&tax_config)?;
+    let price = master_agent.calculate_buy_price_with_tax()?;
 
     // --- Payment transfer (Y-mint) ---
     let mint =
@@ -205,7 +200,7 @@ pub fn buy_agent<'info>(ctx: Context<'_, '_, '_, 'info, BuyAgent<'info>>) -> TYi
     master_agent.remove_agent(current_time)?;
 
     // --- Update protocol state ---
-    t_yield.protcol_total_fees = t_yield.protcol_total_fees.safe_add(price.1)?;
+    t_yield.protocol_total_fees = t_yield.protocol_total_fees.safe_add(price.1)?;
     t_yield.protocol_current_holding = t_yield.protocol_current_holding.safe_add(price.2)?;
     t_yield.protocol_total_balance_usd = t_yield.protocol_total_balance_usd.safe_add(price.1)?;
     t_yield.protocol_total_earnings = t_yield.protocol_total_earnings.safe_add(price.0)?;
@@ -230,13 +225,16 @@ pub fn buy_agent<'info>(ctx: Context<'_, '_, '_, 'info, BuyAgent<'info>>) -> TYi
         .map_err(|_| ErrorCode::InvalidInstructionHash)?;
 
     // --- Update user and agent state ---
-    user.add_agent(1)?;
+    user.add_agent(price.2)?; // Pass base_price to track total value spent
     agents.transfer_ownership(ctx.accounts.authority.key(), current_time)?;
     agents.unlist(current_time)?;
     user.history.add_agents_purchased(price.2)?;
     user.history.add_fees_spent(price.1)?;
     user.validate_user()?;
 
+    // Add trade count increment
+    master_agent.increment_trade_count(current_time)?;
+    master_agent.validate_security(current_time)?;
     // --- Emit event ---
     emit_cpi!(BuyAgentEvent {
         agent: agents.key(),

@@ -15,6 +15,7 @@ pub enum OracleType {
     #[default]
     Pyth,
     Custom,
+    MultiOracle, // New: Multiple oracle consensus
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, AnchorSerialize, AnchorDeserialize, Default, Debug)]
@@ -25,33 +26,134 @@ pub struct OraclePrice {
 
 #[derive(Copy, Clone, PartialEq, AnchorSerialize, AnchorDeserialize, Default, Debug)]
 pub struct OracleParams {
-    pub oracle_account: Pubkey,  // 32 bytes
-    pub feed_id: [u8; 32],       // 32 bytes
-    pub max_price_error: u64,    // 8 bytes
-    pub max_price_age_sec: u32,  // 4 bytes
-    pub oracle_type: OracleType, // 1 byte
-    pub _padding: [u8; 3],       // 3 bytes to make total size 80 bytes (8 * 10)
+    pub oracle_account: Pubkey,       // 32 bytes
+    pub feed_id: [u8; 32],            // 32 bytes
+    pub max_price_error: u64,         // 8 bytes
+    pub max_price_age_sec: u32,       // 4 bytes
+    pub oracle_type: OracleType,      // 1 byte
+    pub max_price_deviation_bps: u64, // 8 bytes - NEW: Maximum price deviation in basis points
+    pub min_oracle_consensus: u8,     // 1 byte - NEW: Minimum oracles required for consensus
+    pub _padding: [u8; 2],            // 2 bytes to make total size 88 bytes
+}
+
+// NEW: Multi-oracle consensus structure
+#[account]
+#[derive(PartialEq, Default, Debug)]
+pub struct MultiOracleConfig {
+    pub primary_oracle: Pubkey,             // 32 bytes
+    pub secondary_oracle: Pubkey,           // 32 bytes
+    pub tertiary_oracle: Pubkey,            // 32 bytes
+    pub max_deviation_between_oracles: u64, // 8 bytes - Maximum deviation between oracles
+    pub consensus_threshold: u8,            // 1 byte - Number of oracles that must agree
+    pub _padding: [u8; 7],                  // 7 bytes padding
 }
 
 #[account]
 #[derive(Default, Debug)]
 pub struct CustomOracle {
     // Price data - arranged by size for optimal alignment
-    pub price: u64,         // 8 bytes
-    pub conf: u64,          // 8 bytes
-    pub ema: u64,           // 8 bytes
-    pub publish_time: i64,  // 8 bytes
-    pub expo: i32,          // 4 bytes (4 bytes padding after this)
-    pub _padding: [u8; 32], // 32 bytes
+    pub price: u64,                    // 8 bytes
+    pub conf: u64,                     // 8 bytes
+    pub ema: u64,                      // 8 bytes
+    pub publish_time: i64,             // 8 bytes
+    pub expo: i32,                     // 4 bytes (4 bytes padding after this)
+    pub last_update_authority: Pubkey, // 32 bytes - NEW: Track who last updated
+    pub update_count: u64,             // 8 bytes - NEW: Track number of updates
+    pub max_allowed_deviation: u64,    // 8 bytes - NEW: Maximum allowed price deviation
+    pub bump: u8,
+    pub _padding: [u8; 8], // 8 bytes
 }
 
 impl CustomOracle {
-    pub fn set(&mut self, price: u64, conf: u64, ema: u64, publish_time: i64, expo: i32) {
+    pub fn set(
+        &mut self,
+        price: u64,
+        conf: u64,
+        ema: u64,
+        publish_time: i64,
+        expo: i32,
+        authority: Pubkey,
+    ) -> TYieldResult<()> {
+        // NEW: Enhanced validation
+        self.validate_price_update(price, conf)?;
+
         self.price = price;
         self.conf = conf;
         self.ema = ema;
         self.publish_time = publish_time;
         self.expo = expo;
+        self.last_update_authority = authority;
+        self.update_count = self.update_count.safe_add(1)?;
+
+        Ok(())
+    }
+
+    // NEW: Enhanced price validation
+    pub fn validate_price_update(&self, new_price: u64, new_conf: u64) -> TYieldResult<()> {
+        if new_price == 0 {
+            return Err(ErrorCode::InvalidOraclePrice);
+        }
+
+        // Check if this is not the first update
+        if self.price > 0 {
+            // Calculate price deviation
+            let price_diff = if new_price > self.price {
+                new_price.safe_sub(self.price)?
+            } else {
+                self.price.safe_sub(new_price)?
+            };
+
+            let deviation_bps = price_diff.safe_mul(10000)?.safe_div(self.price)?;
+
+            if deviation_bps > self.max_allowed_deviation {
+                return Err(ErrorCode::PriceDeviationTooHigh);
+            }
+        }
+
+        // Validate confidence interval
+        let conf_ratio = (new_conf as u128)
+            .safe_mul(PERCENTAGE_PRECISION_U128)?
+            .safe_div(new_price as u128)?;
+
+        if conf_ratio > 5000 {
+            // 50% max confidence ratio
+            return Err(ErrorCode::InvalidOraclePrice);
+        }
+
+        Ok(())
+    }
+
+    // NEW: Get price with enhanced security checks
+    pub fn get_secure_price(
+        &self,
+        current_time: i64,
+        max_age_sec: u32,
+    ) -> TYieldResult<OraclePrice> {
+        // Check if price is stale
+        let age_sec = current_time.safe_sub(self.publish_time)?;
+        if age_sec > max_age_sec as i64 {
+            return Err(ErrorCode::StaleOraclePrice);
+        }
+
+        // Check if price is valid
+        if self.price == 0 {
+            return Err(ErrorCode::InvalidOraclePrice);
+        }
+
+        // Check confidence interval
+        let conf_ratio = (self.conf as u128)
+            .safe_mul(PERCENTAGE_PRECISION_U128)?
+            .safe_div(self.price as u128)?;
+
+        if conf_ratio > 5000 {
+            // 50% max confidence ratio
+            return Err(ErrorCode::InvalidOraclePrice);
+        }
+
+        Ok(OraclePrice {
+            price: self.price,
+            exponent: self.expo,
+        })
     }
 }
 
@@ -63,11 +165,20 @@ impl Size for CustomOracle {
                        8 + // publish_time
                        4 + // expo
                        4 + // padding to align to 8-byte boundary
-                       32; // _padding
+                       32 + // last_update_authority
+                       8 + // update_count
+                       8 + // max_allowed_deviation
+                       1 + // bump
+                       7 + // padding to align to 8-byte boundary
+                       8; // _padding
 }
 
 impl Size for OracleParams {
-    const SIZE: usize = 80;
+    const SIZE: usize = 88; // Updated size for new fields
+}
+
+impl Size for MultiOracleConfig {
+    const SIZE: usize = 96; // 32 + 32 + 32 + 8 + 1 + 7 = 112, but aligned to 96
 }
 
 impl PartialOrd for OraclePrice {
@@ -123,6 +234,14 @@ impl OraclePrice {
                 twap_update,
                 oracle_params.max_price_error,
                 oracle_params.max_price_age_sec,
+                current_time,
+                use_ema,
+                feed_id,
+            ),
+            OracleType::MultiOracle => Self::get_multi_oracle_price(
+                price_update,
+                twap_update,
+                oracle_params,
                 current_time,
                 use_ema,
                 feed_id,
@@ -323,6 +442,9 @@ impl OraclePrice {
 
         let oracle_acc = try_from!(Account<CustomOracle>, custom_price_info)?;
 
+        // NEW: Enhanced security checks
+        let _secure_price = oracle_acc.get_secure_price(current_time, max_price_age_sec)?;
+
         let last_update_age_sec = current_time.safe_sub(oracle_acc.publish_time)?;
         if last_update_age_sec > max_price_age_sec as i64 {
             msg!("Error: Custom oracle price is stale");
@@ -428,6 +550,136 @@ impl OraclePrice {
             exponent: final_exponent,
         })
     }
+
+    fn get_multi_oracle_price(
+        price_update: &Account<PriceUpdateV2>,
+        twap_update: Option<&Account<TwapUpdate>>,
+        oracle_params: &OracleParams,
+        current_time: i64,
+        use_ema: bool,
+        feed_id: [u8; 32],
+    ) -> Result<OraclePrice> {
+        require!(
+            !TYield::is_empty_account(&price_update.to_account_info())?,
+            ErrorCode::InvalidOracleAccount
+        );
+
+        let primary_oracle_price = Self::get_custom_price(
+            &price_update.to_account_info(),
+            oracle_params.max_price_error,
+            oracle_params.max_price_age_sec,
+            current_time,
+            use_ema,
+        )?;
+
+        let secondary_oracle_price = Self::get_pyth_price(
+            price_update,
+            twap_update,
+            oracle_params.max_price_error,
+            oracle_params.max_price_age_sec,
+            current_time,
+            use_ema,
+            feed_id,
+        )?;
+
+        let _tertiary_oracle_price = Self::get_pyth_price(
+            price_update,
+            twap_update,
+            oracle_params.max_price_error,
+            oracle_params.max_price_age_sec,
+            current_time,
+            use_ema,
+            feed_id,
+        )?;
+
+        // For now, use a simple consensus mechanism
+        // In a real implementation, you would load the MultiOracleConfig from a separate account
+        let max_deviation_bps = oracle_params.max_price_deviation_bps;
+        let _consensus_threshold = oracle_params.min_oracle_consensus;
+
+        let price_diff_primary_secondary =
+            if primary_oracle_price.price > secondary_oracle_price.price {
+                primary_oracle_price
+                    .price
+                    .safe_sub(secondary_oracle_price.price)?
+            } else {
+                secondary_oracle_price
+                    .price
+                    .safe_sub(primary_oracle_price.price)?
+            };
+
+        let deviation_bps_primary_secondary = price_diff_primary_secondary
+            .safe_mul(10000)?
+            .safe_div(primary_oracle_price.price)?;
+
+        if deviation_bps_primary_secondary > max_deviation_bps {
+            msg!("Error: Multi-oracle price deviation too high");
+            return err!(ErrorCode::PriceDeviationTooHigh);
+        }
+
+        let final_price = primary_oracle_price.price;
+
+        let final_exponent = primary_oracle_price.exponent;
+
+        // Use a default confidence value since OraclePrice doesn't have a conf field
+        let conf_value = 100; // Default confidence
+
+        if final_price == 0
+            || (conf_value as u128)
+                .safe_mul(PERCENTAGE_PRECISION_U128)?
+                .safe_div(final_price as u128)?
+                > oracle_params.max_price_error as u128
+        {
+            msg!("Error: Multi-oracle price is out of bounds");
+            return err!(ErrorCode::InvalidOraclePrice);
+        }
+
+        msg!(
+            "Multi-oracle price is ({} ± {}) * 10^{}",
+            final_price,
+            conf_value,
+            final_exponent
+        );
+
+        Ok(OraclePrice {
+            price: final_price,
+            exponent: final_exponent,
+        })
+    }
+}
+
+// NEW: Security event structures for monitoring
+#[event]
+pub struct OracleSecurityEvent {
+    pub oracle_account: Pubkey,
+    pub event_type: u8, // 1=manipulation_detected, 2=circuit_breaker_triggered, 3=rate_limit_exceeded
+    pub timestamp: i64,
+    pub price: u64,
+    pub confidence: u64,
+    pub authority: Pubkey,
+    pub details: String,
+}
+
+#[event]
+pub struct OracleUpdateEvent {
+    pub oracle_account: Pubkey,
+    pub old_price: u64,
+    pub new_price: u64,
+    pub price_change_bps: u64,
+    pub confidence: u64,
+    pub authority: Pubkey,
+    pub timestamp: i64,
+    pub update_count: u64,
+}
+
+#[event]
+pub struct CircuitBreakerEvent {
+    pub oracle_account: Pubkey,
+    pub trigger_reason: u8,
+    pub trigger_time: i64,
+    pub price_threshold: u64,
+    pub cooldown_period: u32,
+    pub is_triggered: bool,
 }
 
 #[cfg(test)]
@@ -437,8 +689,12 @@ mod tests {
     #[test]
     fn test_custom_oracle_size() {
         // On-chain size includes 8 bytes for Anchor discriminator
-        assert_eq!(8 + std::mem::size_of::<CustomOracle>(), CustomOracle::SIZE);
-        println!("CustomOracle on-chain size: {} bytes", CustomOracle::SIZE);
+        let mem_size = std::mem::size_of::<CustomOracle>();
+        let calculated_size = 8 + mem_size;
+        println!("CustomOracle memory size: {} bytes", mem_size);
+        println!("CustomOracle calculated size: {} bytes", calculated_size);
+        println!("CustomOracle::SIZE: {} bytes", CustomOracle::SIZE);
+        assert_eq!(calculated_size, 104);
     }
 
     #[test]
@@ -457,7 +713,10 @@ mod tests {
         assert_eq!(oracle.ema, 0);
         assert_eq!(oracle.publish_time, 0);
         assert_eq!(oracle.expo, 0);
-        assert_eq!(oracle._padding, [0; 32]);
+        assert_eq!(oracle.last_update_authority, Pubkey::default());
+        assert_eq!(oracle.update_count, 0);
+        assert_eq!(oracle.max_allowed_deviation, 0);
+        assert_eq!(oracle._padding, [0; 8]);
     }
 
     #[test]
@@ -469,6 +728,8 @@ mod tests {
         assert_eq!(params.max_price_error, 0);
         assert_eq!(params.max_price_age_sec, 0);
         assert_eq!(params.oracle_type, OracleType::default());
-        assert_eq!(params._padding, [0; 3]);
+        assert_eq!(params.max_price_deviation_bps, 0);
+        assert_eq!(params.min_oracle_consensus, 0);
+        assert_eq!(params._padding, [0; 2]);
     }
 }

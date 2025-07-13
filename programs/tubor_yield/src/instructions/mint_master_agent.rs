@@ -28,7 +28,8 @@ use mpl_token_metadata::ID as METADATA_PROGRAM_ID;
 use crate::{
     error::{ErrorCode, TYieldResult},
     state::{
-        AdminInstruction, MasterAgent, MasterAgentInitParams, Multisig, Size, TYield, TradingStatus,
+        AdminInstruction, MasterAgent, MasterAgentInitParams, Multisig, Size, TYield, TaxConfig,
+        TradingStatus,
     },
 };
 
@@ -49,6 +50,10 @@ pub struct MintMasterAgentParams {
     pub w_yield: u64,
     /// Maximum supply of agents under this master agent
     pub max_supply: u64,
+    /// Trading status for the master agent
+    pub trading_status: TradingStatus,
+    /// Whether to auto-relist the master agent
+    pub auto_relist: bool,
 }
 
 /// Accounts required for minting a new master agent NFT.
@@ -190,6 +195,30 @@ pub fn mint_master_agent<'info>(
     ctx: Context<'_, '_, '_, 'info, MintMasterAgent<'info>>,
     params: MintMasterAgentParams,
 ) -> TYieldResult<u8> {
+    // SECURITY: Check protocol state first
+    if ctx.accounts.t_yield.paused {
+        return Err(ErrorCode::EmergencyPauseActive);
+    }
+
+    let current_time = ctx.accounts.t_yield.get_time()?;
+
+    // SECURITY: Check circuit breaker
+    ctx.accounts.t_yield.check_circuit_breaker(current_time)?;
+
+    // SECURITY: Check rate limiting
+    ctx.accounts.t_yield.check_rate_limit(current_time)?;
+
+    // SECURITY: Validate input parameters
+    if params.price == 0 {
+        return Err(ErrorCode::InvalidEntryPrice);
+    }
+    if params.w_yield == 0 {
+        return Err(ErrorCode::InvalidState);
+    }
+    if params.max_supply == 0 {
+        return Err(ErrorCode::InvalidState);
+    }
+
     let mut multisig = ctx
         .accounts
         .multisig
@@ -199,10 +228,14 @@ pub fn mint_master_agent<'info>(
     let instruction_data = Multisig::get_instruction_data(AdminInstruction::DeployAgent, &params)
         .map_err(|_| ErrorCode::InvalidInstructionHash)?;
 
+    let nonce = current_time as u64; // Use current time as nonce for simplicity
+
     let signatures_left = multisig.sign_multisig(
         &ctx.accounts.payer,
         &Multisig::get_account_infos(&ctx)[1..],
         &instruction_data,
+        nonce,
+        current_time,
     )?;
     if signatures_left > 0 {
         msg!(
@@ -212,7 +245,6 @@ pub fn mint_master_agent<'info>(
         return Ok(signatures_left);
     }
 
-    let current_time = ctx.accounts.t_yield.get_time()?;
     let master_agent = ctx.accounts.master_agent.as_mut();
 
     let master_agent_init_params = MasterAgentInitParams {
@@ -220,16 +252,19 @@ pub fn mint_master_agent<'info>(
         mint: ctx.accounts.mint.key(),
         price: params.price,
         w_yield: params.w_yield,
-        trading_status: TradingStatus::WhiteList,
+        trading_status: params.trading_status,
         max_supply: params.max_supply,
-        auto_relist: true,
+        auto_relist: params.auto_relist,
         current_time,
         bump: ctx.bumps.master_agent,
+        tax_config: TaxConfig::default(), // SECURITY: Use default tax config
     };
 
     master_agent.initialize(master_agent_init_params)?;
 
+    // SECURITY: Validate the initialized master agent
     master_agent.validate()?;
+    master_agent.validate_security(current_time)?;
 
     ctx.accounts
         .t_yield

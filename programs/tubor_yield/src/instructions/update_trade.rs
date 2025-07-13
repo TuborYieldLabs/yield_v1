@@ -133,18 +133,17 @@ pub fn update_trade<'info>(
 
         // Complete the trade with success result
         trade.complete(TradeResult::Success);
-        trade.updated_at = current_time;
 
         // Update master agent trade count and PnL
         master_agent.completed_trades = master_agent.completed_trades.safe_add(1)?;
-        master_agent.total_pnl = master_agent.total_pnl.safe_add(pnl as u64)?;
+        master_agent.total_pnl = master_agent.total_pnl.safe_add(pnl.unsigned_abs())?;
 
         // Emit trade event
         emit_cpi!(crate::state::trade::TradeEvent {
             trade: trade.key(),
             status: TradeStatus::Completed,
             trade_type: trade.get_trade_type(),
-            result: TradeResult::Failed,
+            result: TradeResult::Success,
             pnl,
             created_at: current_time,
         });
@@ -163,11 +162,10 @@ pub fn update_trade<'info>(
 
         // Complete the trade with failed result
         trade.complete(TradeResult::Failed);
-        trade.updated_at = current_time;
 
         // Update master agent trade count and PnL
         master_agent.completed_trades = master_agent.completed_trades.safe_add(1)?;
-        master_agent.total_pnl = master_agent.total_pnl.safe_add(pnl as u64)?;
+        master_agent.total_pnl = master_agent.total_pnl.safe_add(pnl.unsigned_abs())?;
 
         // Emit trade event
         emit_cpi!(crate::state::trade::TradeEvent {

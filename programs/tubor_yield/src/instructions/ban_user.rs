@@ -75,10 +75,15 @@ pub fn ban_user<'info>(ctx: Context<'_, '_, '_, 'info, BanUser<'info>>) -> TYiel
     let instruction_data = Multisig::get_instruction_data(AdminInstruction::BanUser, &())
         .map_err(|_| ErrorCode::InvalidInstructionHash)?;
 
+    let current_time = ctx.accounts.t_yield.get_time()?;
+    let nonce = current_time as u64; // Use current time as nonce for simplicity
+
     let signatures_left = multisig.sign_multisig(
         &ctx.accounts.admin,
         &Multisig::get_account_infos(&ctx)[1..],
         &instruction_data,
+        nonce,
+        current_time,
     )?;
     if signatures_left > 0 {
         msg!(
@@ -87,11 +92,10 @@ pub fn ban_user<'info>(ctx: Context<'_, '_, '_, 'info, BanUser<'info>>) -> TYiel
         );
         return Ok(signatures_left);
     }
-
-    let current_time = ctx.accounts.t_yield.get_time()?;
     let user = ctx.accounts.user.as_mut();
 
-    user.ban_user();
+    user.ban_user()?;
+    user.update_last_activity(current_time)?;
     user.validate_user()?;
 
     emit_cpi!(UpdateUserStatusEvent {

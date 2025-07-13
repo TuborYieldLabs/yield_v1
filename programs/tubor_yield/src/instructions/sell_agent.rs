@@ -35,7 +35,7 @@ use mpl_token_metadata::ID as METADATA_PROGRAM_ID;
 use crate::{
     error::{ErrorCode, TYieldResult},
     math::SafeMath,
-    state::{Agent, MasterAgent, SellAgentEvent, TYield, TaxConfig, TransferAgentParams, User},
+    state::{Agent, MasterAgent, SellAgentEvent, TYield, TransferAgentParams, User},
     try_from,
 };
 
@@ -184,17 +184,16 @@ pub fn sell_agent<'info>(ctx: Context<'_, '_, '_, 'info, SellAgent<'info>>) -> T
         return Err(ErrorCode::CannotPerformAction);
     }
 
+    // Validate agent ownership
+    if !agents.is_owned_by(&ctx.accounts.authority.key()) {
+        return Err(ErrorCode::CannotPerformAction);
+    }
+
     if !agents.belongs_to_master_agent(&master_agent.key()) {
         return Err(ErrorCode::CannotPerformAction);
     }
 
-    let tax_config = TaxConfig {
-        buy_tax_percentage: t_yield.buy_tax,
-        sell_tax_percentage: t_yield.sell_tax,
-        max_tax_percentage: t_yield.max_tax_percentage,
-    };
-
-    let price = master_agent.calculate_sell_price_with_tax(&tax_config)?;
+    let price = master_agent.calculate_sell_price_with_tax()?;
 
     let mint =
         try_from!(Account<Mint>, ctx.accounts.y_mint).map_err(|_| ErrorCode::AccountFromError)?;
@@ -205,13 +204,13 @@ pub fn sell_agent<'info>(ctx: Context<'_, '_, '_, 'info, SellAgent<'info>>) -> T
         ctx.accounts.user_y_mint_ta.to_account_info(),
         ctx.accounts.transfer_authority.to_account_info(),
         ctx.accounts.token_program.to_account_info(),
-        price.0,
+        price.0, // net_price (what user receives)
         mint.decimals,
     )
     .map_err(|_| ErrorCode::InvalidInstructionHash)?;
 
-    t_yield.protcol_total_fees = t_yield.protcol_total_fees.safe_add(price.1)?;
-    t_yield.protocol_current_holding = t_yield.protocol_current_holding.safe_sub(price.2)?;
+    t_yield.protocol_total_fees = t_yield.protocol_total_fees.safe_add(price.1)?;
+    t_yield.protocol_current_holding = t_yield.protocol_current_holding.safe_sub(price.0)?; // Use net_price instead of base_price
     t_yield.protocol_total_balance_usd = t_yield.protocol_total_balance_usd.safe_sub(price.1)?;
     t_yield.protocol_total_earnings = t_yield.protocol_total_earnings.safe_add(price.1)?;
 

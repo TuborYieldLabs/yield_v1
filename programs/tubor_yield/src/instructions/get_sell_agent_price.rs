@@ -15,7 +15,7 @@ use anchor_spl::token::Mint;
 
 use crate::{
     error::TYieldResult,
-    state::{Agent, AgentPrice, MasterAgent, TYield, TaxConfig},
+    state::{Agent, AgentPrice, MasterAgent, TYield},
 };
 
 /// Accounts required to query the sell price for an agent NFT to a master agent.
@@ -63,15 +63,9 @@ pub struct GetSellAgentPrice<'info> {
 /// * `AgentPrice` - Struct containing total price, tax amount, and base price.
 pub fn get_sell_agent_price(ctx: Context<GetSellAgentPrice>) -> TYieldResult<AgentPrice> {
     let master_agent = ctx.accounts.master_agent.as_ref();
-    let t_yield = ctx.accounts.t_yield.as_ref();
+    let _t_yield = ctx.accounts.t_yield.as_ref();
 
-    let tax_config = TaxConfig {
-        buy_tax_percentage: t_yield.buy_tax,
-        sell_tax_percentage: t_yield.sell_tax,
-        max_tax_percentage: t_yield.max_tax_percentage,
-    };
-
-    let result = master_agent.calculate_sell_price_with_tax(&tax_config)?;
+    let result = master_agent.calculate_sell_price_with_tax()?;
 
     Ok(AgentPrice {
         total_price: result.0,

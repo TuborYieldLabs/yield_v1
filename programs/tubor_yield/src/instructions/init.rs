@@ -26,7 +26,7 @@ use {
 };
 
 /// Parameters for protocol initialization.
-#[derive(AnchorSerialize, AnchorDeserialize, Copy, Clone)]
+#[derive(AnchorSerialize, AnchorDeserialize, Copy, Clone, Default)]
 pub struct InitParams {
     /// Minimum number of signatures required for multisig actions.
     pub min_signatures: u8,
@@ -48,6 +48,14 @@ pub struct InitParams {
     pub ref_earn_percentage: u64,
     /// Supported SPL token mint for protocol operations.
     pub supported_mint: Pubkey,
+    /// Whether protocol is paused at initialization (optional, default false)
+    pub paused: Option<bool>,
+    /// Initial circuit breaker state (optional)
+    pub circuit_breaker: Option<crate::state::t_yield::CircuitBreaker>,
+    /// Initial rate limiter state (optional)
+    pub rate_limiter: Option<crate::state::t_yield::RateLimiter>,
+    /// Initial parameter bounds (optional)
+    pub parameter_bounds: Option<crate::state::t_yield::ParameterBounds>,
 }
 
 /// Accounts required for protocol initialization.
@@ -190,8 +198,21 @@ pub fn init(ctx: Context<Init>, params: &InitParams) -> TYieldResult<()> {
     t_yield.buy_tax = params.buy_tax;
     t_yield.sell_tax = params.sell_tax;
     t_yield.max_tax_percentage = params.max_tax_percentage;
+    t_yield.ref_earn_percentage = params.ref_earn_percentage;
 
     t_yield.inception_time = t_yield.get_time()?;
+
+    // Set additional protocol state fields if provided
+    t_yield.paused = params.paused.unwrap_or(false);
+    if let Some(cb) = params.circuit_breaker {
+        t_yield.circuit_breaker = cb;
+    }
+    if let Some(rl) = params.rate_limiter {
+        t_yield.rate_limiter = rl;
+    }
+    if let Some(pb) = params.parameter_bounds {
+        t_yield.parameter_bounds = pb;
+    }
 
     emit_cpi!(InitProtocolEvent {
         inception_time: t_yield.inception_time,

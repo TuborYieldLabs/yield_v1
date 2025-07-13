@@ -117,20 +117,30 @@ pub struct RegisterUser<'info> {
 }
 
 pub fn register_user(ctx: Context<RegisterUser>, params: RegisterUserParams) -> TYieldResult<()> {
+    // Check if optional referral accounts are provided when no referrer is specified
     if params.referrer.is_none()
         && (ctx.accounts.referral_registry.is_some() || ctx.accounts.referral_link.is_some())
     {
-        return Err(ErrorCode::InvalidReferrer);
+        return Err(ErrorCode::ReferrerNotAUser);
     }
 
+    // Validate referrer if provided
     if let Some(referrer_pubkey) = params.referrer {
         if referrer_pubkey != Pubkey::default() {
+            // Check if referrer user account exists and is valid
             let referrer_user = ctx
                 .accounts
                 .referrer_user
                 .as_ref()
                 .ok_or(ErrorCode::ReferrerNotAUser)?;
+
+            // Validate referrer authority matches the provided referrer pubkey
             if referrer_user.authority != referrer_pubkey {
+                return Err(ErrorCode::ReferrerNotAUser);
+            }
+
+            // Ensure referrer is an active user
+            if !referrer_user.is_active() {
                 return Err(ErrorCode::ReferrerNotAUser);
             }
         }
@@ -139,17 +149,19 @@ pub fn register_user(ctx: Context<RegisterUser>, params: RegisterUserParams) -> 
     let user = &mut ctx.accounts.user;
     let current_time = ctx.accounts.t_yield.get_time()?;
 
+    // Initialize user account
     user.authority = ctx.accounts.authority.key();
     user.name = params.name;
-    user.add_user_status(UserStatus::Active);
+    let _ = user.add_user_status(UserStatus::Active);
     user.referrer = params.referrer.unwrap_or_default();
     user.updated_at = current_time;
     user.created_at = current_time;
     user.bump = ctx.bumps.user;
 
-    // If there's a referrer, update the referral registry
+    // Handle referral logic if referrer is provided
     if let Some(referrer_pubkey) = params.referrer {
         if referrer_pubkey != Pubkey::default() {
+            // Update referral registry
             if let Some(ref mut referral_registry) = ctx.accounts.referral_registry {
                 // Initialize referral registry if it's new
                 if referral_registry.referrer == Pubkey::default() {
@@ -158,12 +170,13 @@ pub fn register_user(ctx: Context<RegisterUser>, params: RegisterUserParams) -> 
                     referral_registry.bump =
                         ctx.bumps.referral_registry.ok_or(ErrorCode::InvalidBump)?;
                 }
-                // Increment total referred users and update timestamp (actual referral links are tracked via ReferralLink accounts)
+                // Increment total referred users and update timestamp
                 referral_registry.total_referred_users =
                     referral_registry.total_referred_users.safe_add(1)?;
                 referral_registry.updated_at = current_time;
             }
 
+            // Initialize referral link
             if let Some(ref mut referral_link) = ctx.accounts.referral_link {
                 // Only initialize if new
                 if referral_link.referrer == Pubkey::default()

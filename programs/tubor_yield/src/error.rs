@@ -87,9 +87,21 @@ pub enum ErrorCode {
     #[msg("Multisig transaction already executed")]
     MultisigAlreadyExecuted,
 
+    /// Invalid delegate account provided
+    #[msg("Invalid delegate account provided")]
+    InvalidDelegate,
+
     /// Invalid referrer account provided
     #[msg("Invalid referrer provided")]
     InvalidReferrer,
+
+    /// Invalid state detected
+    #[msg("Invalid state detected")]
+    InvalidState,
+
+    /// Cannot perform the requested action in current state
+    #[msg("Cannot perform the requested action in current state")]
+    CannotPerformAction,
 
     /// Invalid bump seed provided for PDA derivation
     #[msg("Invalid bump provided")]
@@ -197,10 +209,6 @@ pub enum ErrorCode {
     #[msg("Price deviation from expected range is too high")]
     PriceDeviationTooHigh,
 
-    /// Cannot perform the requested action in current state
-    #[msg("Cannot perform the requested action in current state")]
-    CannotPerformAction,
-
     /// Error occurred while creating account from instruction data
     #[msg("Failed to create account from instruction data")]
     AccountFromError,
@@ -220,6 +228,72 @@ pub enum ErrorCode {
     /// Generic Solana program error
     #[msg("Solana program error occurred")]
     ProgramError,
+
+    // Enhanced multisig security errors
+    /// Invalid nonce provided for replay protection
+    #[msg("Invalid nonce: expected higher value")]
+    InvalidNonce,
+
+    /// Rate limit exceeded for signature attempts
+    #[msg("Rate limit exceeded: too many signature attempts")]
+    RateLimitExceeded,
+
+    /// Signatures have expired and need to be renewed
+    #[msg("Signatures have expired and need to be renewed")]
+    SignaturesExpired,
+
+    /// Duplicate signer detected in multisig configuration
+    #[msg("Duplicate signer detected in multisig configuration")]
+    DuplicateSigner,
+
+    /// Invalid signer index provided
+    #[msg("Invalid signer index provided")]
+    InvalidSignerIndex,
+
+    /// Instruction hash mismatch detected
+    #[msg("Instruction hash mismatch detected")]
+    InstructionHashMismatch,
+
+    // NEW: Enhanced oracle security errors
+    /// Multi-oracle consensus failed - insufficient agreement
+    #[msg("Multi-oracle consensus failed - insufficient agreement")]
+    MultiOracleConsensusFailed,
+
+    /// Oracle price deviation between sources is too high
+    #[msg("Oracle price deviation between sources is too high")]
+    OracleDeviationTooHigh,
+
+    /// Circuit breaker triggered - trading temporarily suspended
+    #[msg("Circuit breaker triggered - trading temporarily suspended")]
+    CircuitBreakerTriggered,
+
+    /// Oracle update rate limit exceeded
+    #[msg("Oracle update rate limit exceeded")]
+    OracleUpdateRateLimitExceeded,
+
+    /// Invalid oracle authority - unauthorized price update attempt
+    #[msg("Invalid oracle authority - unauthorized price update attempt")]
+    InvalidOracleAuthority,
+
+    /// Oracle confidence interval exceeds maximum allowed threshold
+    #[msg("Oracle confidence interval exceeds maximum allowed threshold")]
+    OracleConfidenceExceeded,
+
+    /// Multi-oracle configuration is invalid
+    #[msg("Multi-oracle configuration is invalid")]
+    InvalidMultiOracleConfig,
+
+    /// Oracle consensus threshold not met
+    #[msg("Oracle consensus threshold not met")]
+    OracleConsensusThresholdNotMet,
+
+    /// Emergency pause activated - all operations suspended
+    #[msg("Emergency pause activated - all operations suspended")]
+    EmergencyPauseActive,
+
+    /// Oracle price manipulation detected
+    #[msg("Oracle price manipulation detected")]
+    OracleManipulationDetected,
 }
 
 /// Macro for printing error information with file and line details

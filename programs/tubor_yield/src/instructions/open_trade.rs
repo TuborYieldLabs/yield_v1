@@ -104,10 +104,15 @@ pub fn open_trade<'info>(
 let instruction_data = Multisig::get_instruction_data(AdminInstruction::OpenTrade, &params)
     .map_err(|_| ErrorCode::InvalidInstructionHash)?;
 
+let current_time = ctx.accounts.t_yield.get_time()?;
+let nonce = current_time as u64; // Use current time as nonce for simplicity
+
 let signatures_left = multisig.sign_multisig(
     &ctx.accounts.authority,
     &Multisig::get_account_infos(&ctx)[1..],
     &instruction_data,
+    nonce,
+    current_time,
 )?;
 if signatures_left > 0 {
     msg!(
@@ -116,9 +121,6 @@ if signatures_left > 0 {
     );
     return Ok(signatures_left);
 }
-
-
-let current_time = ctx.accounts.t_yield.get_time()?;
 
 
 let token_price = OraclePrice::new_from_oracle(
@@ -148,7 +150,11 @@ let temp_trade = Trade {
     trade_type: params.trade_type as u8,
     result: TradeResult::Pending as u8,
     bump: 0,
-    _padding: [0; 4],
+    authority: ctx.accounts.authority.key(),
+    oracle_consensus_count: 0,
+    last_price_update: current_time,
+    circuit_breaker_triggered: false,
+    _padding: [0; 2],
 };
 
 // Get current market price from oracle
@@ -233,7 +239,7 @@ if risk_reward_ratio < validation_config.min_risk_reward_bps {
 // Validate stop loss and take profit distances
 temp_trade.validate_risk_management_levels(validation_config.min_distance_bps)?;
 
-// All validations passed, initialize the trade
+// All validations passed, initialize the trade securely
 let trade = ctx.accounts.trade.as_mut();
 
 let init_trade_params = TradeInitParams {
@@ -248,14 +254,14 @@ let init_trade_params = TradeInitParams {
     status: TradeStatus::Active,
     trade_type: params.trade_type,
     result: TradeResult::Pending,
-    bump: 2,
+    bump: ctx.bumps.trade, // Use actual PDA bump instead of hardcoded value
 };
 
-trade.init_trade(init_trade_params);
+// Use secure initialization with proper authority
+trade.init_trade_secure(init_trade_params, ctx.accounts.authority.key())?;
 
 let master_agent = ctx.accounts.master_agent.as_mut();
 master_agent.trade_count = master_agent.trade_count.safe_add(1)?;
-
 
 msg!("Trade opened successfully with comprehensive price validation");
 

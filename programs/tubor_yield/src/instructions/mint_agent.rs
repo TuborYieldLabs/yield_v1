@@ -203,10 +203,15 @@ pub fn mint_agent<'info>(
     let instruction_data = Multisig::get_instruction_data(AdminInstruction::DeployAgent, &params)
         .map_err(|_| ErrorCode::InvalidInstructionHash)?;
 
+    let current_time = ctx.accounts.t_yield.get_time()?;
+    let nonce = current_time as u64; // Use current time as nonce for simplicity
+
     let signatures_left = multisig.sign_multisig(
         &ctx.accounts.payer,
         &Multisig::get_account_infos(&ctx)[1..],
         &instruction_data,
+        nonce,
+        current_time,
     )?;
     if signatures_left > 0 {
         msg!(
@@ -216,26 +221,37 @@ pub fn mint_agent<'info>(
         return Ok(signatures_left);
     }
 
-    let current_time = ctx.accounts.t_yield.get_time()?;
+    // Validate protocol permissions
+    if !ctx.accounts.t_yield.permissions.allow_agent_deploy {
+        return Err(ErrorCode::CannotPerformAction);
+    }
+
+    // Validate master agent has available supply
+    if ctx.accounts.master_agent.is_supply_full() {
+        return Err(ErrorCode::CannotPerformAction);
+    }
 
     {
         let master_agent = ctx.accounts.master_agent.as_mut();
         let agent = ctx.accounts.agent.as_mut();
 
+        // Initialize agent with protocol ownership and default booster
         agent.initialize(
             master_agent.key(),
             ctx.accounts.mint.key(),
-            ctx.accounts.authority.key(),
-            0,
+            ctx.accounts.authority.key(), // Protocol authority owns the agent initially
+            10,
             current_time,
             ctx.bumps.agent,
         )?;
 
         agent.validate()?;
 
+        // Add agent to master agent's count
         master_agent.add_agent(current_time)?;
     }
 
+    // Create metadata and mint the NFT
     ctx.accounts
         .t_yield
         .mint_agent(&ctx, params)
@@ -245,7 +261,7 @@ pub fn mint_agent<'info>(
 
     emit_cpi!(MintAgentEvent {
         agent: agent.key(),
-        owner: agent.owner,
+        owner: agent.owner, // This is the protocol authority
         master_agent: agent.master_agent,
         timestamp: current_time
     });

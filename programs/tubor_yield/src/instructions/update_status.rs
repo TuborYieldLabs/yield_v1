@@ -28,6 +28,7 @@ pub struct UpdateStatusParams {
 /// 6. Event authority (for CPI event logs)
 /// 7. System program
 #[derive(Accounts)]
+
 pub struct UpdateStatus<'info> {
     /// Admin or operator initiating the status update.
     /// Must sign the transaction. Must be a member of the multisig.
@@ -101,10 +102,15 @@ pub fn update_status<'info>(
     let instruction_data = Multisig::get_instruction_data(AdminInstruction::PermManager, &params)
         .map_err(|_| ErrorCode::InvalidInstructionHash)?;
 
+    let current_time = ctx.accounts.t_yield.get_time()?;
+    let nonce = current_time as u64; // Use current time as nonce for simplicity
+
     let signatures_left = multisig.sign_multisig(
         &ctx.accounts.admin,
-        &Multisig::get_account_infos(&ctx)[1..],
+        &Multisig::get_account_infos(&ctx),
         &instruction_data,
+        nonce,
+        current_time,
     )?;
     if signatures_left > 0 {
         msg!(
@@ -114,9 +120,8 @@ pub fn update_status<'info>(
         return Ok(signatures_left);
     }
 
-    let current_time = ctx.accounts.t_yield.get_time()?;
     let user = ctx.accounts.user.as_mut();
-    user.add_user_status(params.status);
+    user.add_user_status(params.status)?;
 
     emit_cpi!(UpdateUserStatusEvent {
         authority: user.authority,

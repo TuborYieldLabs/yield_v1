@@ -35,13 +35,25 @@ pub fn pause_protocol<'info>(
         .load_mut()
         .map_err(|_| ErrorCode::InvalidBump)?;
 
+    // Check if protocol is already paused
+    if ctx.accounts.t_yield.paused {
+        msg!("Protocol is already paused.");
+        return Err(ErrorCode::CannotPerformAction);
+    }
+
     let instruction_data = Multisig::get_instruction_data(AdminInstruction::PermManager, &())
         .map_err(|_| ErrorCode::InvalidInstructionHash)?;
+
+    let current_time = ctx.accounts.t_yield.get_time()?;
+    // Use a more unique nonce: combine current time with admin pubkey hash
+    let nonce = current_time as u64 + (ctx.accounts.admin.key().to_bytes()[0] as u64);
 
     let signatures_left = multisig.sign_multisig(
         &ctx.accounts.admin,
         &Multisig::get_account_infos(&ctx)[1..],
         &instruction_data,
+        nonce,
+        current_time,
     )?;
     if signatures_left > 0 {
         msg!(

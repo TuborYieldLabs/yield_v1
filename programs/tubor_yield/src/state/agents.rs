@@ -4,6 +4,23 @@ use crate::error::{ErrorCode, TYieldResult};
 use crate::math::SafeMath;
 use crate::state::Size;
 
+/// Represents an agent in the Tubor Yield protocol.
+///
+/// An agent is a tradeable entity that can be bought, sold, and managed by users.
+/// Each agent has a boost multiplier that affects trading performance and belongs
+/// to a master agent category.
+///
+/// # Fields
+///
+/// - `master_agent`: The master agent this agent belongs to
+/// - `mint`: The mint address of the agent token
+/// - `owner`: The current owner of the agent
+/// - `booster`: Boost multiplier as a percentage (e.g., 15000 = 150%)
+/// - `created_at`: Timestamp when the agent was created
+/// - `last_updated`: Timestamp of the last update to the agent
+/// - `is_listed`: Whether the agent is currently listed for trading
+/// - `bump`: PDA bump seed for the agent account
+/// - `_padding`: Reserved space for future additions
 #[account]
 #[derive(Eq, PartialEq, Debug, Default)]
 pub struct Agent {
@@ -25,6 +42,7 @@ pub struct Agent {
     pub _padding: [u8; 6], // 6 bytes for future additions
 }
 
+/// Event emitted when an agent is bought.
 #[event]
 pub struct BuyAgentEvent {
     pub agent: Pubkey,
@@ -33,6 +51,7 @@ pub struct BuyAgentEvent {
     pub timestamp: i64,
 }
 
+/// Event emitted when an agent is sold.
 #[event]
 pub struct SellAgentEvent {
     pub agent: Pubkey,
@@ -41,6 +60,7 @@ pub struct SellAgentEvent {
     pub timestamp: i64,
 }
 
+/// Event emitted when an agent is minted.
 #[event]
 pub struct MintAgentEvent {
     pub agent: Pubkey,
@@ -50,7 +70,38 @@ pub struct MintAgentEvent {
 }
 
 impl Agent {
-    /// Initialize a new Agent
+    /// Initializes a new agent with the specified parameters.
+    ///
+    /// # Arguments
+    ///
+    /// * `master_agent` - The master agent this agent belongs to
+    /// * `mint` - The mint address of the agent token
+    /// * `owner` - The initial owner of the agent
+    /// * `booster` - Boost multiplier as a percentage (e.g., 15000 = 150%)
+    /// * `current_time` - Current timestamp
+    /// * `bump` - PDA bump seed for the agent account
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success, or an error if initialization fails.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use tubor_yield::state::agents::Agent;
+    /// use anchor_lang::solana_program::pubkey::Pubkey;
+    ///
+    /// let mut agent = Agent::default();
+    /// let master_agent = Pubkey::new_unique();
+    /// let mint = Pubkey::new_unique();
+    /// let owner = Pubkey::new_unique();
+    /// let booster = 15000; // 150% boost
+    /// let current_time = 1640995200;
+    /// let bump = 255;
+    ///
+    /// let result = agent.initialize(master_agent, mint, owner, booster, current_time, bump);
+    /// assert!(result.is_ok());
+    /// ```
     pub fn initialize(
         &mut self,
         master_agent: Pubkey,
@@ -71,7 +122,20 @@ impl Agent {
         Ok(())
     }
 
-    /// Update the booster value
+    /// Updates the booster value of the agent.
+    ///
+    /// # Arguments
+    ///
+    /// * `new_booster` - New boost multiplier as a percentage
+    /// * `current_time` - Current timestamp
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success, or an error if the booster is invalid.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ErrorCode::InvalidAccount` if the new booster value is zero.
     pub fn update_booster(&mut self, new_booster: u64, current_time: i64) -> TYieldResult<()> {
         if new_booster == 0 {
             return Err(ErrorCode::InvalidAccount);
@@ -81,7 +145,19 @@ impl Agent {
         Ok(())
     }
 
-    /// List the agent for trading
+    /// Lists the agent for trading.
+    ///
+    /// # Arguments
+    ///
+    /// * `current_time` - Current timestamp
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success, or an error if the agent is already listed.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ErrorCode::InvalidAccount` if the agent is already listed.
     pub fn list(&mut self, current_time: i64) -> TYieldResult<()> {
         if self.is_listed {
             return Err(ErrorCode::InvalidAccount);
@@ -91,7 +167,19 @@ impl Agent {
         Ok(())
     }
 
-    /// Unlist the agent from trading
+    /// Unlists the agent from trading.
+    ///
+    /// # Arguments
+    ///
+    /// * `current_time` - Current timestamp
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success, or an error if the agent is not listed.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ErrorCode::InvalidAccount` if the agent is not currently listed.
     pub fn unlist(&mut self, current_time: i64) -> TYieldResult<()> {
         if !self.is_listed {
             return Err(ErrorCode::InvalidAccount);
@@ -101,7 +189,17 @@ impl Agent {
         Ok(())
     }
 
-    /// Toggle the listing status
+    /// Toggles the listing status of the agent.
+    ///
+    /// If the agent is listed, it will be unlisted. If it's unlisted, it will be listed.
+    ///
+    /// # Arguments
+    ///
+    /// * `current_time` - Current timestamp
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success, or an error if the operation fails.
     pub fn toggle_listing(&mut self, current_time: i64) -> TYieldResult<()> {
         if self.is_listed {
             self.unlist(current_time)
@@ -110,7 +208,20 @@ impl Agent {
         }
     }
 
-    /// Transfer ownership of the agent
+    /// Transfers ownership of the agent to a new owner.
+    ///
+    /// # Arguments
+    ///
+    /// * `new_owner` - The new owner's public key
+    /// * `current_time` - Current timestamp
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success, or an error if the new owner is invalid.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ErrorCode::InvalidAccount` if the new owner is the default public key.
     pub fn transfer_ownership(&mut self, new_owner: Pubkey, current_time: i64) -> TYieldResult<()> {
         if new_owner == Pubkey::default() {
             return Err(ErrorCode::InvalidAccount);
@@ -120,55 +231,125 @@ impl Agent {
         Ok(())
     }
 
-    /// Check if the agent is currently listed
+    /// Checks if the agent is currently listed for trading.
+    ///
+    /// # Returns
+    ///
+    /// Returns `true` if the agent is listed, `false` otherwise.
     pub fn is_listed_for_trading(&self) -> bool {
         self.is_listed
     }
 
-    /// Check if the agent belongs to a specific owner
+    /// Checks if the agent belongs to a specific owner.
+    ///
+    /// # Arguments
+    ///
+    /// * `owner` - The owner's public key to check against
+    ///
+    /// # Returns
+    ///
+    /// Returns `true` if the agent belongs to the specified owner, `false` otherwise.
     pub fn is_owned_by(&self, owner: &Pubkey) -> bool {
         self.owner == *owner
     }
 
-    /// Check if the agent belongs to a specific master agent
+    /// Checks if the agent belongs to a specific master agent.
+    ///
+    /// # Arguments
+    ///
+    /// * `master_agent` - The master agent's public key to check against
+    ///
+    /// # Returns
+    ///
+    /// Returns `true` if the agent belongs to the specified master agent, `false` otherwise.
     pub fn belongs_to_master_agent(&self, master_agent: &Pubkey) -> bool {
         self.master_agent == *master_agent
     }
 
-    /// Get the boost multiplier as a percentage
+    /// Gets the boost multiplier as a percentage.
+    ///
+    /// # Returns
+    ///
+    /// Returns the boost multiplier as a percentage (e.g., 15000 = 150%).
     pub fn get_boost_percentage(&self) -> u64 {
         self.booster
     }
 
-    /// Calculate the effective boost multiplier (booster / 10000 for percentage)
+    /// Calculates the effective boost multiplier as a decimal.
+    ///
+    /// # Returns
+    ///
+    /// Returns the boost multiplier as a decimal (e.g., 15000 returns 1.5).
     pub fn get_boost_multiplier(&self) -> f64 {
         self.booster as f64 / 10000.0
     }
 
-    /// Get days since the agent was created
+    /// Calculates the number of days since the agent was created.
+    ///
+    /// # Arguments
+    ///
+    /// * `current_time` - Current timestamp
+    ///
+    /// # Returns
+    ///
+    /// Returns the number of days since the agent was created.
     pub fn get_days_since_created(&self, current_time: i64) -> i64 {
         let seconds_diff = current_time - self.created_at;
         seconds_diff / 86400 // 86400 seconds in a day
     }
 
-    /// Get days since the agent was last updated
+    /// Calculates the number of days since the agent was last updated.
+    ///
+    /// # Arguments
+    ///
+    /// * `current_time` - Current timestamp
+    ///
+    /// # Returns
+    ///
+    /// Returns the number of days since the agent was last updated.
     pub fn get_days_since_updated(&self, current_time: i64) -> i64 {
         let seconds_diff = current_time - self.last_updated;
         seconds_diff / 86400 // 86400 seconds in a day
     }
 
-    /// Check if the agent is active (created and not too old)
+    /// Checks if the agent is active.
+    ///
+    /// An agent is considered active if it has been created and the last update
+    /// timestamp is not before the creation timestamp.
+    ///
+    /// # Returns
+    ///
+    /// Returns `true` if the agent is active, `false` otherwise.
     pub fn is_active(&self) -> bool {
         self.created_at > 0 && self.last_updated >= self.created_at
     }
 
-    /// Check if the agent is idle (no updates for a while)
+    /// Checks if the agent is idle based on the specified threshold.
+    ///
+    /// # Arguments
+    ///
+    /// * `current_time` - Current timestamp
+    /// * `idle_threshold_days` - Number of days of inactivity to consider the agent idle
+    ///
+    /// # Returns
+    ///
+    /// Returns `true` if the agent has been inactive for more than the threshold, `false` otherwise.
     pub fn is_idle(&self, current_time: i64, idle_threshold_days: i64) -> bool {
         let days_since_update = self.get_days_since_updated(current_time);
         days_since_update > idle_threshold_days
     }
 
-    /// Validate the agent's data integrity
+    /// Validates the agent's data integrity.
+    ///
+    /// Checks that all required fields have valid values.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` if the agent is valid, or an error if validation fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ErrorCode::InvalidAccount` if any required field is invalid.
     pub fn validate(&self) -> TYieldResult<()> {
         if self.master_agent == Pubkey::default() {
             return Err(ErrorCode::InvalidAccount);
@@ -191,12 +372,22 @@ impl Agent {
         Ok(())
     }
 
-    /// Check if the agent can perform actions
+    /// Checks if the agent can perform actions.
+    ///
+    /// An agent can perform actions if it is active.
+    ///
+    /// # Returns
+    ///
+    /// Returns `true` if the agent can perform actions, `false` otherwise.
     pub fn can_perform_actions(&self) -> bool {
         self.is_active()
     }
 
-    /// Get the agent's status string
+    /// Gets a string representation of the agent's status.
+    ///
+    /// # Returns
+    ///
+    /// Returns a string describing the agent's status: "Inactive", "Listed", or "Unlisted".
     pub fn get_status_string(&self) -> String {
         if !self.is_active() {
             "Inactive".to_string()
@@ -207,7 +398,11 @@ impl Agent {
         }
     }
 
-    /// Get the listing status string
+    /// Gets a string representation of the agent's listing status.
+    ///
+    /// # Returns
+    ///
+    /// Returns "Listed" if the agent is listed, "Unlisted" otherwise.
     pub fn get_listing_status_string(&self) -> String {
         if self.is_listed {
             "Listed".to_string()
@@ -216,7 +411,11 @@ impl Agent {
         }
     }
 
-    /// Get summary statistics
+    /// Gets summary statistics for the agent.
+    ///
+    /// # Returns
+    ///
+    /// Returns a tuple containing: (master_agent, mint, owner, booster, is_listed, created_at).
     pub fn get_summary(&self) -> (Pubkey, Pubkey, Pubkey, u64, bool, i64) {
         (
             self.master_agent,
@@ -228,7 +427,18 @@ impl Agent {
         )
     }
 
-    /// Check if the agent needs attention (old, inactive, etc.)
+    /// Checks if the agent needs attention based on age and activity.
+    ///
+    /// An agent needs attention if it has been inactive for more than 30 days,
+    /// was created more than 365 days ago, or is not active.
+    ///
+    /// # Arguments
+    ///
+    /// * `current_time` - Current timestamp
+    ///
+    /// # Returns
+    ///
+    /// Returns `true` if the agent needs attention, `false` otherwise.
     pub fn needs_attention(&self, current_time: i64) -> bool {
         let days_since_update = self.get_days_since_updated(current_time);
         let days_since_created = self.get_days_since_created(current_time);
@@ -240,28 +450,65 @@ impl Agent {
         days_since_update > 30 || days_since_created > 365 || !self.is_active()
     }
 
-    /// Reset the agent (for testing/debugging)
+    /// Resets the agent to its initial state (for testing/debugging).
+    ///
+    /// This method is intended for testing purposes and should not be used in production.
     pub fn reset(&mut self) {
         self.is_listed = false;
         self.last_updated = self.created_at;
     }
 
-    /// Get the agent's age in days
+    /// Gets the agent's age in days.
+    ///
+    /// # Arguments
+    ///
+    /// * `current_time` - Current timestamp
+    ///
+    /// # Returns
+    ///
+    /// Returns the number of days since the agent was created.
     pub fn get_age_days(&self, current_time: i64) -> i64 {
         self.get_days_since_created(current_time)
     }
 
-    /// Check if the agent is newly created (less than 7 days old)
+    /// Checks if the agent is newly created (less than 7 days old).
+    ///
+    /// # Arguments
+    ///
+    /// * `current_time` - Current timestamp
+    ///
+    /// # Returns
+    ///
+    /// Returns `true` if the agent is less than 7 days old, `false` otherwise.
     pub fn is_new(&self, current_time: i64) -> bool {
         self.get_age_days(current_time) < 7
     }
 
-    /// Check if the agent is mature (more than 30 days old)
+    /// Checks if the agent is mature (more than 30 days old).
+    ///
+    /// # Arguments
+    ///
+    /// * `current_time` - Current timestamp
+    ///
+    /// # Returns
+    ///
+    /// Returns `true` if the agent is more than 30 days old, `false` otherwise.
     pub fn is_mature(&self, current_time: i64) -> bool {
         self.get_age_days(current_time) >= 30
     }
 
-    /// Get the agent's performance score based on age and activity
+    /// Calculates a performance score for the agent based on age and activity.
+    ///
+    /// The score is based on the boost multiplier with bonuses for recent activity
+    /// and maturity, and penalties for being very old.
+    ///
+    /// # Arguments
+    ///
+    /// * `current_time` - Current timestamp
+    ///
+    /// # Returns
+    ///
+    /// Returns a performance score as a u64 value.
     pub fn get_performance_score(&self, current_time: i64) -> u64 {
         let age_days = self.get_age_days(current_time);
         let days_since_update = self.get_days_since_updated(current_time);

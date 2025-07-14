@@ -7,7 +7,7 @@
 <h1 align="center">Tubor Yield Protocol</h1>
 
 <p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-ISC-blue.svg" alt="License"></a>
+  <a href="LICENSE"><img src="https://opensource.org/licenses/Apache-2.0" alt="License"></a>
   <a href="https://solana.com/"><img src="https://img.shields.io/badge/Solana-Anchor-blueviolet" alt="Solana"></a>
   <a href="#"><img src="https://img.shields.io/badge/build-anchor-green" alt="Build"></a>
 </p>

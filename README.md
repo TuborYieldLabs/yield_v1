@@ -47,56 +47,77 @@ Tubor Yield is a robust, security-focused DeFi protocol built on Solana, leverag
 <summary><strong>Click to expand API details</strong></summary>
 
 #### 1. `init`
+
 Initialize the protocol, multisig, and authority accounts.
+
 - **Params:** `InitParams { min_signatures, allow_agent_deploy, allow_agent_buy, allow_agent_sell, allow_withdraw_yield, buy_tax, sell_tax, max_tax_percentage, ref_earn_percentage, supported_mint, ... }`
 - **Accounts:** Upgrade authority, multisig PDA, protocol state PDA, transfer authority PDA, supported mint, etc.
 
 #### 2. `register_user`
+
 Register a new user, optionally with a referrer.
+
 - **Params:** `RegisterUserParams { name: [u8; 15], referrer: Option<Pubkey> }`
 - **Accounts:** payer, authority, user PDA, (optional) referrer, referral registry, referral link, t_yield, event authority, system program.
 
 #### 3. `mint_master_agent`
+
 Mint a new master agent NFT (requires multisig).
+
 - **Params:** `MintMasterAgentParams { name, symbol, uri, seller_fee_basis_points, price, w_yield, max_supply, trading_status, auto_relist }`
 - **Accounts:** payer, multisig, master agent PDA, mint, t_yield, transfer authority, Metaplex metadata, etc.
 
 #### 4. `mint_agent`
+
 Mint a new agent NFT under a master agent (requires multisig).
+
 - **Params:** `MintAgentParams { name, symbol, uri, seller_fee_basis_points }`
 - **Accounts:** payer, multisig, t_yield, transfer authority, mint, metadata, master agent, agent, token account, etc.
 
 #### 5. `buy_agent`
+
 Buy an agent NFT from a master agent.
+
 - **Params:** None (all info from accounts)
 - **Accounts:** authority, user, agent, master agent, t_yield, transfer authority, y_mint, token accounts, event authority, etc.
 
 #### 6. `open_trade`
+
 Open a new trade.
+
 - **Params:** `OpenTradeParams { entry_price, take_profit, size, stop_loss, trade_type, feed_id, trade_pair }`
 - **Accounts:** authority, t_yield, multisig, oracle, twap, master agent, master agent mint, trade, system program.
 
 #### 7. `update_yield`
+
 Update a master agent’s yield rate (requires multisig).
+
 - **Params:** `UpdateYieldParams { new_yield_rate }`
 - **Accounts:** authority, multisig, t_yield, master agent, master agent mint, system program, event authority.
 
 #### 8. `update_trade`
+
 Update a trade’s status based on current price (can be called by anyone).
+
 - **Params:** None
 - **Accounts:** authority, t_yield, oracle, twap, trade, master agent, event authority, system program.
 
 #### 9. `update_protocol_config`
+
 Update protocol configuration (requires multisig).
+
 - **Params:** `UpdateProtocolConfigParams { buy_tax, sell_tax, max_tax_percentage, allow_agent_deploy, ... }`
 - **Accounts:** admin, multisig, t_yield, system program, event authority.
 
 #### 10. `pause_protocol` / `unpause_protocol`
+
 Pause or unpause the protocol (requires multisig).
+
 - **Params:** None
 - **Accounts:** admin, multisig, t_yield.
 
 #### 11. `claim_referral_rewards`, `withdraw_yield`, `ban_user`, etc.
+
 See the `instructions/` directory for full details.
 
 </details>
@@ -165,11 +186,13 @@ We welcome contributions from the community! To contribute:
 5. **Open a pull request** with a clear description of your changes and reference any related issues.
 
 **Code Style:**
+
 - Use Prettier for formatting (`yarn lint:fix`).
 - Follow Rust and TypeScript best practices.
 - Keep PRs focused and minimal.
 
 **Reporting Issues:**
+
 - Please use GitHub Issues for bug reports and feature requests.
 - Include as much detail as possible (logs, steps to reproduce, etc.).
 
@@ -234,4 +257,15 @@ Anchor.toml                   # Anchor/cluster configuration
 
 ## 📄 License
 
-This project is licensed under the ISC License. 
+This project is licensed under the ISC License.
+
+---
+
+## 📝 Licenses
+
+- **Tubor Yield Protocol:** ISC License (see LICENSE file)
+- **Anchor Framework:** Apache-2.0 License ([github.com/coral-xyz/anchor](https://github.com/coral-xyz/anchor))
+- **Solana:** Apache-2.0 License ([github.com/solana-labs/solana](https://github.com/solana-labs/solana))
+- **Metaplex:** Apache-2.0 License ([github.com/metaplex-foundation/metaplex-program-library](https://github.com/metaplex-foundation/metaplex-program-library))
+
+This project may use other open source dependencies. Please review their respective repositories for detailed license information.

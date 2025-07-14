@@ -263,7 +263,7 @@ This project is licensed under the ISC License.
 
 ## 📝 Licenses
 
-- **Tubor Yield Protocol:** ISC License (see LICENSE file)
+- **Tubor Yield Protocol:** Apache-2.0 License (see LICENSE file)
 - **Anchor Framework:** Apache-2.0 License ([github.com/coral-xyz/anchor](https://github.com/coral-xyz/anchor))
 - **Solana:** Apache-2.0 License ([github.com/solana-labs/solana](https://github.com/solana-labs/solana))
 - **Metaplex:** Apache-2.0 License ([github.com/metaplex-foundation/metaplex-program-library](https://github.com/metaplex-foundation/metaplex-program-library))

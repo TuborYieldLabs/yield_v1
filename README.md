@@ -1,7 +1,7 @@
 # Tubor Yield Protocol
 
 <p align="center">
-  <img src="https://user-images.githubusercontent.com/placeholder/tubor_yield_logo.png" width="120" alt="Tubor Yield Logo"/>
+  <img src="https://github.com/TuborYieldLabs/yield_v1/blob/main/kit/logo.png?raw=true" width="120" alt="Tubor Yield Logo"/>
 </p>
 
 <h1 align="center">Tubor Yield Protocol</h1>

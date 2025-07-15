@@ -11,15 +11,15 @@ pub mod state;
 
 use instructions::*;
 
+use crate::{
+    error::TYieldResult,
+    state::{AgentPrice, OraclePrice},
+};
+
 declare_id!("EiifDJcZo3QthKQ2ZrdNSMsDufw4A4sGdsEQkZyRnhNs");
 
 #[program]
 pub mod tuboryield {
-    use crate::{
-        error::TYieldResult,
-        state::{AgentPrice, OraclePrice},
-    };
-
     use super::*;
 
     pub fn init<'info>(

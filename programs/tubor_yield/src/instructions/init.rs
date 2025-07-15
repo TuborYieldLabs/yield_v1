@@ -117,6 +117,7 @@ pub struct Init<'info> {
 
     // --- Mint & Token Accounts ---
     /// Supported SPL token mint for protocol operations.
+    /// CHECK: This is a PDA controlled by the program, only used as authority.
     #[account(
         address = params.supported_mint
     )]

@@ -21,7 +21,8 @@ use crate::{
     state::{ReferralLink, ReferralRegistry, RegisterUserEvent, Size, TYield, User, UserStatus},
 };
 
-#[derive(AnchorSerialize, AnchorDeserialize)]
+#[derive(AnchorSerialize, AnchorDeserialize, Copy, Clone)]
+
 pub struct RegisterUserParams {
     /// Display name for the user (max 15 bytes, UTF-8 encoded)
     pub name: [u8; 15],
@@ -67,10 +68,7 @@ pub struct RegisterUser<'info> {
 
     /// The user account of the referrer (if provided).
     /// Seeds: ["user", referrer]
-    #[account(
-        seeds = [b"user", referrer_user_seeds(params.referrer).as_ref()],
-        bump,
-    )]
+    #[account()]
     pub referrer_user: Option<Box<Account<'info, User>>>,
 
     /// Registry tracking all users referred by the referrer (if provided).
@@ -133,6 +131,13 @@ pub fn register_user(ctx: Context<RegisterUser>, params: RegisterUserParams) -> 
                 .referrer_user
                 .as_ref()
                 .ok_or(ErrorCode::ReferrerNotAUser)?;
+
+            // Validate that the referrer_user account is the correct PDA
+            let (expected_referrer_user_pda, _) =
+                Pubkey::find_program_address(&[b"user", referrer_pubkey.as_ref()], ctx.program_id);
+            if referrer_user.key() != expected_referrer_user_pda {
+                return Err(ErrorCode::ReferrerNotAUser);
+            }
 
             // Validate referrer authority matches the provided referrer pubkey
             if referrer_user.authority != referrer_pubkey {
@@ -210,9 +215,4 @@ pub fn register_user(ctx: Context<RegisterUser>, params: RegisterUserParams) -> 
     });
 
     Ok(())
-}
-
-// Helper function for referrer_user seeds
-fn referrer_user_seeds(referrer: Option<Pubkey>) -> Pubkey {
-    referrer.unwrap_or_default()
 }
